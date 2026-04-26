@@ -1,54 +1,186 @@
-﻿import streamlit as st # type: ignore
-from streamlit_folium import st_folium # type: ignore
-import folium # type: ignore
-import osmnx as ox # type: ignore
-import networkx as nx  # type: ignore
+import streamlit as st
+from streamlit_folium import st_folium
+import folium
+import osmnx as ox
+import networkx as nx
 import random
 import time
 import pandas as pd
 import numpy as np
+import os
+import logging
+
 try:
-    from tensorflow import keras # type: ignore
+    from tensorflow import keras
 except ImportError:
     keras = None
-import os
+
+# ---------------- LOGGING ----------------
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ---------------- PAGE CONFIG ----------------
 st.set_page_config(layout="wide", page_title="🚑 Ambulance Routing Dashboard", page_icon="🚑")
 
+# ---------------- CUSTOM CSS ----------------
 st.markdown("""
 <style>
-    .main-header { 
-        background: linear-gradient(90deg, #ff4757, #ff3838); 
-        padding: 1rem; 
-        border-radius: 10px; 
-        color: white; 
-        text-align: center; 
-        margin-bottom: 1rem;
+    .main-header {
+        background: linear-gradient(135deg, #e63946 0%, #d62828 50%, #c1121f 100%);
+        padding: 1.2rem 1.5rem;
+        border-radius: 12px;
+        color: white;
+        text-align: center;
+        margin-bottom: 1.2rem;
+        box-shadow: 0 4px 15px rgba(230, 57, 70, 0.3);
+    }
+    .main-header h1 { margin: 0; font-size: 1.8rem; font-weight: 700; }
+    .main-header p { margin: 0.3rem 0 0 0; font-size: 0.95rem; opacity: 0.9; }
+    .status-card {
+        background: #f8f9fa;
+        border-radius: 10px;
+        padding: 0.8rem;
+        border-left: 4px solid #e63946;
+        margin-bottom: 0.5rem;
+    }
+    div[data-testid="stMetric"] {
+        background: #f8f9fa;
+        border-radius: 8px;
+        padding: 0.6rem 0.8rem;
+        border: 1px solid #e9ecef;
+    }
+    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 8px 8px 0 0;
+        padding: 8px 16px;
     }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-header"><h1>🚑 Smart Ambulance Routing Dashboard</h1><p>Real-Time Emergency Navigation — Anna Nagar, Chennai</p></div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="main-header">'
+    "<h1>🚑 Smart Ambulance Routing Dashboard</h1>"
+    "<p>Real-Time Emergency Navigation — Anna Nagar, Chennai</p>"
+    "</div>",
+    unsafe_allow_html=True,
+)
 
-# ---------------- LSTM MODEL LOADING ----------------
+# ================================================================
+# HELPER: safe edge attribute access (works for Graph & MultiGraph)
+# ================================================================
+
+def _edge_attr(G, u, v, attr, default=0.0):
+    """Safely get an edge attribute regardless of Graph vs MultiGraph."""
+    data = G.get_edge_data(u, v)
+    if data is None:
+        return default
+    # Regular Graph: data is {attr: val, ...}
+    if attr in data:
+        try:
+            return float(data[attr])
+        except (TypeError, ValueError):
+            return default
+    # MultiGraph: data is {0: {attr: val}, 1: {...}, ...}
+    vals = []
+    for v_data in data.values():
+        if isinstance(v_data, dict) and attr in v_data:
+            try:
+                vals.append(float(v_data[attr]))
+            except (TypeError, ValueError):
+                continue
+    return min(vals) if vals else default
+
+
+def _edge_attrs(G, u, v):
+    """Return a flat dict of edge attributes (first key for MultiGraph)."""
+    data = G.get_edge_data(u, v)
+    if data is None:
+        return {}
+    if "length" in data:
+        return dict(data)
+    for v_data in data.values():
+        if isinstance(v_data, dict):
+            return dict(v_data)
+    return {}
+
+
+# ================================================================
+# LSTM MODEL LOADING & TRAFFIC DATA
+# ================================================================
+TRAFFIC_CSV = "_traffic_2026.csv"
+MODEL_PATH = "lstm_junction1_model.h5"
+SEQUENCE_LENGTH = 24  # 24 hourly steps
+
+
 @st.cache_resource
 def load_lstm_model():
     if keras is None:
+        logger.warning("TensorFlow not installed — LSTM predictions disabled.")
         return None
-    model_path = "lstm_junction1_model.h5"
     try:
-        if os.path.exists(model_path):
-            model = keras.models.load_model(model_path, compile=False)
+        if os.path.exists(MODEL_PATH):
+            model = keras.models.load_model(MODEL_PATH, compile=False)
+            logger.info("LSTM model loaded successfully.")
             return model
         else:
-            st.warning(f"LSTM model not found. Using default congestion factors.")
+            logger.warning("LSTM model file not found at %s", MODEL_PATH)
             return None
     except Exception as e:
-        st.warning(f"Failed to load LSTM model: {e}")
+        logger.error("Failed to load LSTM model: %s", e)
         return None
 
+
+@st.cache_data
+def load_traffic_data():
+    """Load and preprocess the traffic CSV for LSTM inference."""
+    if not os.path.exists(TRAFFIC_CSV):
+        logger.warning("Traffic CSV not found at %s", TRAFFIC_CSV)
+        return None, None
+    try:
+        df = pd.read_csv(TRAFFIC_CSV, parse_dates=["DateTime"])
+        # Normalize vehicle counts per junction to [0, 1]
+        max_vehicles = df["Vehicles"].max()
+        if max_vehicles == 0:
+            max_vehicles = 1
+        df["Vehicles_norm"] = df["Vehicles"] / max_vehicles
+        return df, max_vehicles
+    except Exception as e:
+        logger.error("Failed to load traffic CSV: %s", e)
+        return None, None
+
+
+def predict_congestion(model, traffic_df, max_vehicles, num_predictions):
+    """Use the LSTM model with real traffic data to predict congestion levels."""
+    if model is None or traffic_df is None:
+        return np.random.choice([0.3, 0.5, 0.8], size=num_predictions)
+
+    try:
+        # Build sequences from the most recent traffic data for junction 1
+        j1 = traffic_df[traffic_df["Junction"] == 1]["Vehicles_norm"].values
+        if len(j1) < SEQUENCE_LENGTH:
+            # Pad with zeros if not enough data
+            j1 = np.pad(j1, (SEQUENCE_LENGTH - len(j1), 0), constant_values=0.0)
+
+        # Use the last SEQUENCE_LENGTH values as the base sequence
+        base_seq = j1[-SEQUENCE_LENGTH:].astype("float32")
+
+        # Create a batch with slight random perturbations to simulate different edges
+        rng = np.random.default_rng(42)
+        noise = rng.normal(0, 0.05, size=(num_predictions, SEQUENCE_LENGTH))
+        batch = np.clip(base_seq[np.newaxis, :] + noise, 0, 1).astype("float32")
+        batch = batch.reshape(num_predictions, SEQUENCE_LENGTH, 1)
+
+        predictions = model.predict(batch, verbose=0, batch_size=min(128, num_predictions)).flatten()
+        # Clamp to [0, 1]
+        predictions = np.clip(predictions, 0.0, 1.0)
+        return predictions
+    except Exception as e:
+        logger.error("LSTM prediction failed: %s", e)
+        return np.random.choice([0.3, 0.5, 0.8], size=num_predictions)
+
+
 def get_congestion_factor(prediction):
+    """Map a [0,1] prediction to a congestion multiplier."""
     if prediction < 0.4:
         return 1.0
     elif prediction < 0.7:
@@ -56,158 +188,152 @@ def get_congestion_factor(prediction):
     else:
         return 2.0
 
-lstm_model = load_lstm_model()
 
-# ---------------- GRAPH LOADING ----------------
+lstm_model = load_lstm_model()
+traffic_df, max_vehicles = load_traffic_data()
+
+
+# ================================================================
+# GRAPH LOADING
+# ================================================================
 @st.cache_resource
 def load_graph():
+    """Download the Anna Nagar road network and return an undirected graph."""
     try:
-        return ox.graph_from_place("Anna Nagar, Chennai, India", network_type="drive").to_undirected()
+        G = ox.graph_from_place(
+            "Anna Nagar, Chennai, India", network_type="drive"
+        )
+        G = G.to_undirected()
+        logger.info(
+            "Graph loaded: %d nodes, %d edges", G.number_of_nodes(), G.number_of_edges()
+        )
+        return G
     except Exception as e:
         st.error(f"Failed to load map data: {e}")
+        logger.error("Graph loading failed: %s", e)
         return None
 
-def get_min_edge_length(graph, u, v):
-    edge_data = graph.get_edge_data(u, v, default={}) or {}
-    if not edge_data:
-        return 0.0
-    if isinstance(edge_data, dict) and "length" in edge_data:
-        try:
-            return float(edge_data["length"])
-        except (TypeError, ValueError):
-            return 0.0
-    lengths = []
-    if isinstance(edge_data, dict):
-        for attrs in edge_data.values():
-            if isinstance(attrs, dict) and "length" in attrs:
-                try:
-                    lengths.append(float(attrs["length"]))
-                except (TypeError, ValueError):
-                    continue
-    return min(lengths) if lengths else 0.0
 
-def build_alternate_routes(graph, primary_route, start_node, destination, max_alternates=3):
+# ================================================================
+# ALTERNATE ROUTE BUILDER
+# ================================================================
+def build_alternate_routes(G, primary_route, start_node, destination, max_alternates=3):
     """Build alternate routes by temporarily removing edges from the primary route."""
     alternates = []
-    for i in range(1, min(len(primary_route) - 1, 6)):
-        if graph.has_edge(primary_route[i], primary_route[i + 1]):
-            edge_data = graph.get_edge_data(primary_route[i], primary_route[i + 1])
-            graph.remove_edge(primary_route[i], primary_route[i + 1])
-            try:
-                alt_route = nx.shortest_path(graph, start_node, destination, weight="dynamic_weight")
-                if alt_route not in alternates and alt_route != primary_route:
-                    alternates.append(alt_route)
-            except nx.NetworkXNoPath:
-                pass
-            graph.add_edge(primary_route[i], primary_route[i + 1], **edge_data)
-            if len(alternates) >= max_alternates:
-                break
+    limit = min(len(primary_route) - 1, 6)
+    for i in range(1, limit):
+        u, v = primary_route[i], primary_route[i + 1]
+        if not G.has_edge(u, v):
+            continue
+        saved = _edge_attrs(G, u, v)
+        G.remove_edge(u, v)
+        try:
+            alt = nx.shortest_path(G, start_node, destination, weight="dynamic_weight")
+            if alt not in alternates and alt != primary_route:
+                alternates.append(alt)
+        except nx.NetworkXNoPath:
+            pass
+        G.add_edge(u, v, **saved)
+        if len(alternates) >= max_alternates:
+            break
     return alternates
 
-# ---------------- ROUTE COMPUTATION ----------------
+
+# ================================================================
+# ROUTE COMPUTATION
+# ================================================================
 def calculate_routes(seed, _lstm_model=None):
-    """Load graph, apply LSTM congestion, fetch hospitals."""
+    """Load graph, apply LSTM congestion weights, fetch hospitals."""
     G = load_graph()
     if G is None:
         return None
-    
-    num_edges = G.number_of_edges()
-    
-    if _lstm_model is not None:
-        try:
-            batch_data = np.random.rand(num_edges, 24, 1).astype('float32') * 0.8
-            predictions = _lstm_model.predict(batch_data, verbose=0, batch_size=128).flatten()
-        except Exception as e:
-            predictions = np.random.choice([0.3, 0.5, 0.8], size=num_edges)
-    else:
-        predictions = np.random.choice([0.3, 0.5, 0.8], size=num_edges)
-    
-    for idx, (u, v, data) in enumerate(G.edges(data=True)):
-        if 'length' in data:
-            prediction = float(predictions[idx])
-            congestion_factor = get_congestion_factor(prediction)
-            data['dynamic_weight'] = data['length'] * congestion_factor
-            data['congestion_factor'] = congestion_factor
-        else:
-            data['dynamic_weight'] = 100
-            data['congestion_factor'] = 1.0
 
+    num_edges = G.number_of_edges()
+
+    # --- Apply congestion weights using LSTM + real traffic data ---
+    predictions = predict_congestion(_lstm_model, traffic_df, max_vehicles, num_edges)
+
+    for idx, (u, v, data) in enumerate(G.edges(data=True)):
+        length = data.get("length", 100.0)
+        try:
+            length = float(length)
+        except (TypeError, ValueError):
+            length = 100.0
+        pred = float(predictions[idx]) if idx < len(predictions) else 0.5
+        cf = get_congestion_factor(pred)
+        data["dynamic_weight"] = length * cf
+        data["congestion_factor"] = cf
+
+    # --- Fetch hospitals ---
     hospital_nodes = []
     hospital_coords = []
     try:
-        tags = {"amenity": "hospital"}
-        hospital_gdf = ox.features_from_place("Anna Nagar, Chennai, India", tags)
-        
+        hospital_gdf = ox.features_from_place(
+            "Anna Nagar, Chennai, India", tags={"amenity": "hospital"}
+        )
         for geom in hospital_gdf.geometry:
             try:
                 lon, lat = geom.centroid.x, geom.centroid.y
-                nearest_node = ox.distance.nearest_nodes(G, lon, lat)
-                if nearest_node not in hospital_nodes:
-                    hospital_nodes.append(nearest_node)
+                nearest = ox.distance.nearest_nodes(G, lon, lat)
+                if nearest not in hospital_nodes:
+                    hospital_nodes.append(nearest)
                     hospital_coords.append((lat, lon))
             except (AttributeError, ValueError):
                 continue
     except Exception as e:
-        st.warning(f"Could not fetch hospitals: {e}")
+        logger.warning("Could not fetch hospitals from OSM: %s", e)
 
+    # Fallback: random nodes as hospitals
     if not hospital_nodes:
         nodes = list(G.nodes)
         hospital_nodes = random.sample(nodes, min(5, len(nodes)))
-        hospital_coords = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in hospital_nodes]
+        hospital_coords = [
+            (G.nodes[n]["y"], G.nodes[n]["x"]) for n in hospital_nodes
+        ]
 
     return {
         "G": G,
         "hospital_nodes": hospital_nodes,
-        "hospital_coords": hospital_coords
+        "hospital_coords": hospital_coords,
     }
 
+
 def compute_route_for_ambulance(scenario_data, ambulance_node):
-    """Select nearest hospital and compute route from ambulance's current node - EXACTLY like reference code."""
+    """Select nearest hospital and compute optimal + alternate routes."""
     if scenario_data is None:
         return None
 
     G = scenario_data["G"]
     hospital_nodes = scenario_data["hospital_nodes"]
-    
-    # Calculate distances to all hospitals using dynamic weights (LSTM-based)
+
     distances = {}
     for h in hospital_nodes:
         try:
-            distances[h] = nx.shortest_path_length(G, ambulance_node, h, weight="dynamic_weight")
+            distances[h] = nx.shortest_path_length(
+                G, ambulance_node, h, weight="dynamic_weight"
+            )
         except nx.NetworkXNoPath:
             continue
-    
+
     if not distances:
         return None
-    
+
     destination = min(distances, key=distances.get)
-    
+
     try:
-        optimal_route = nx.shortest_path(G, ambulance_node, destination, weight="dynamic_weight")
+        optimal_route = nx.shortest_path(
+            G, ambulance_node, destination, weight="dynamic_weight"
+        )
     except nx.NetworkXNoPath:
         return None
 
-    lats = [G.nodes[n]['y'] for n in optimal_route]
-    lons = [G.nodes[n]['x'] for n in optimal_route]
+    lats = [G.nodes[n]["y"] for n in optimal_route]
+    lons = [G.nodes[n]["x"] for n in optimal_route]
     center = [(min(lats) + max(lats)) / 2, (min(lons) + max(lons)) / 2]
 
-    alternate_routes = []
-    for i in range(1, min(len(optimal_route) - 1, 6)):
-        if G.has_edge(optimal_route[i], optimal_route[i+1]):
-            edge_data = G.get_edge_data(optimal_route[i], optimal_route[i+1])
-            G.remove_edge(optimal_route[i], optimal_route[i+1])
-
-            try:
-                alt_route = nx.shortest_path(G, ambulance_node, destination, weight="dynamic_weight")
-                if alt_route not in alternate_routes and len(alt_route) != len(optimal_route):
-                    alternate_routes.append(alt_route)
-            except nx.NetworkXNoPath:
-                pass
-
-            G.add_edge(optimal_route[i], optimal_route[i+1], **edge_data)
-
-            if len(alternate_routes) >= 3:
-                break
+    alternate_routes = build_alternate_routes(
+        G, optimal_route, ambulance_node, destination
+    )
 
     return {
         "G": G,
@@ -218,11 +344,15 @@ def compute_route_for_ambulance(scenario_data, ambulance_node):
         "distances": distances,
         "optimal_route": optimal_route,
         "alternate_routes": alternate_routes,
-        "center": center
+        "center": center,
     }
 
+
+# ================================================================
+# STATE MANAGEMENT HELPERS
+# ================================================================
 def sync_ambulance_state(amb):
-    """Single source of truth for node/step/status transitions."""
+    """Single source of truth for node / step / status transitions."""
     if amb["routes_data"] is None:
         amb["status"] = "Idle"
         amb["auto_drive"] = False
@@ -235,12 +365,13 @@ def sync_ambulance_state(amb):
         amb["routes_data"] = None
         return
 
-    amb["step"] = min(max(int(amb["step"]), 0), len(route) - 1)
+    last_idx = len(route) - 1
+    amb["step"] = max(0, min(int(amb["step"]), last_idx))
     amb["node"] = route[amb["step"]]
     amb["routes_data"]["start"] = amb["node"]
 
-    if amb["step"] >= len(route) - 1:
-        amb["step"] = len(route) - 1
+    if amb["step"] >= last_idx:
+        amb["step"] = last_idx
         amb["node"] = route[-1]
         amb["routes_data"]["start"] = amb["node"]
         amb["status"] = "Arrived"
@@ -248,14 +379,17 @@ def sync_ambulance_state(amb):
     else:
         amb["status"] = "En Route"
 
+
 def assign_emergency_to_ambulance(ambulance_id, scenario_data, pickup_node):
     """Assign emergency: Phase 1 = ambulance → pickup."""
     amb = st.session_state.fleet[ambulance_id]
     ambulance_node = amb["node"]
     G = scenario_data["G"]
-    
+
     try:
-        route_to_pickup = nx.shortest_path(G, ambulance_node, pickup_node, weight="dynamic_weight")
+        route_to_pickup = nx.shortest_path(
+            G, ambulance_node, pickup_node, weight="dynamic_weight"
+        )
     except nx.NetworkXNoPath:
         return False
 
@@ -267,8 +401,10 @@ def assign_emergency_to_ambulance(ambulance_id, scenario_data, pickup_node):
         "hospital_coords": scenario_data["hospital_coords"],
         "optimal_route": route_to_pickup,
         "alternate_routes": [],
-        "center": [(G.nodes[ambulance_node]['y'] + G.nodes[pickup_node]['y'])/2,
-                   (G.nodes[ambulance_node]['x'] + G.nodes[pickup_node]['x'])/2]
+        "center": [
+            (G.nodes[ambulance_node]["y"] + G.nodes[pickup_node]["y"]) / 2,
+            (G.nodes[ambulance_node]["x"] + G.nodes[pickup_node]["x"]) / 2,
+        ],
     }
     amb["step"] = 0
     amb["auto_drive"] = False
@@ -281,11 +417,14 @@ def assign_emergency_to_ambulance(ambulance_id, scenario_data, pickup_node):
     amb["slider_override"] = True
     return True
 
-# ---------------- FLEET INITIALIZATION ----------------
+
+# ================================================================
+# FLEET INITIALIZATION
+# ================================================================
 if "fleet" not in st.session_state:
-    G = load_graph()
-    if G:
-        nodes = list(G.nodes)
+    G_init = load_graph()
+    if G_init:
+        nodes = list(G_init.nodes)
         st.session_state.fleet = {}
         for i in range(1, 6):
             st.session_state.fleet[f"A{i}"] = {
@@ -299,7 +438,7 @@ if "fleet" not in st.session_state:
                 "slider_override": False,
                 "phase": None,
                 "pickup_node": None,
-                "destination_hospital": None
+                "destination_hospital": None,
             }
     else:
         st.session_state.fleet = {}
@@ -310,56 +449,83 @@ if "last_move_ts" not in st.session_state:
 if "current_emergency" not in st.session_state:
     st.session_state.current_emergency = None
 
-# ---------------- SIDEBAR MODE SELECTION ----------------
+
+# ================================================================
+# SIDEBAR — MODE SELECTION & EMERGENCY DISPATCH
+# ================================================================
 with st.sidebar:
     st.header("🎛️ Control Panel")
     mode = st.radio("Select View Mode", ["👨‍💼 Admin Dashboard", "🚑 Ambulance Panel"])
-    
+
     if mode == "🚑 Ambulance Panel":
-        selected_ambulance = st.selectbox("Select Ambulance", list(st.session_state.fleet.keys()))
-    
-    if st.button("🔄 Generate New Emergency Scenario", type="primary", use_container_width=True):
+        selected_ambulance = st.selectbox(
+            "Select Ambulance", list(st.session_state.fleet.keys())
+        )
+
+    st.divider()
+
+    if st.button(
+        "🔄 Generate New Emergency Scenario",
+        type="primary",
+        use_container_width=True,
+    ):
         scenario_seed = int(time.time())
         scenario_data = calculate_routes(scenario_seed, lstm_model)
         if scenario_data:
             G = scenario_data["G"]
-            all_nodes = list(G.nodes)
-            emergency_node = random.choice(all_nodes)
+            emergency_node = random.choice(list(G.nodes))
             st.session_state.current_emergency = emergency_node
-            
+
             if mode == "🚑 Ambulance Panel":
-                if assign_emergency_to_ambulance(selected_ambulance, scenario_data, emergency_node):
-                    st.success(f"✅ {selected_ambulance} dispatched to pickup location")
+                if assign_emergency_to_ambulance(
+                    selected_ambulance, scenario_data, emergency_node
+                ):
+                    st.success(f"✅ {selected_ambulance} dispatched to pickup")
                 else:
-                    st.error(f"❌ No route available for {selected_ambulance}")
+                    st.error(f"❌ No route for {selected_ambulance}")
             else:
-                idle_ambulances = [aid for aid, amb in st.session_state.fleet.items() if amb["status"] == "Idle"]
-                if idle_ambulances:
-                    min_dist = float("inf")
-                    nearest_amb = None
-                    
-                    for aid in idle_ambulances:
-                        amb_node = st.session_state.fleet[aid]["node"]
+                # Admin mode: auto-dispatch nearest idle ambulance
+                idle = [
+                    aid
+                    for aid, a in st.session_state.fleet.items()
+                    if a["status"] == "Idle"
+                ]
+                if idle:
+                    best_id, best_dist = None, float("inf")
+                    for aid in idle:
                         try:
-                            dist = nx.shortest_path_length(G, amb_node, emergency_node, weight="dynamic_weight")
-                            if dist < min_dist:
-                                min_dist = dist
-                                nearest_amb = aid
-                        except:
+                            d = nx.shortest_path_length(
+                                G,
+                                st.session_state.fleet[aid]["node"],
+                                emergency_node,
+                                weight="dynamic_weight",
+                            )
+                            if d < best_dist:
+                                best_dist, best_id = d, aid
+                        except nx.NetworkXNoPath:
                             continue
-                    
-                    if nearest_amb:
-                        if assign_emergency_to_ambulance(nearest_amb, scenario_data, emergency_node):
-                            st.success(f"✅ Nearest ambulance {nearest_amb} dispatched to pickup location")
-                        else:
-                            st.error(f"❌ No route available for {nearest_amb}")
+                    if best_id and assign_emergency_to_ambulance(
+                        best_id, scenario_data, emergency_node
+                    ):
+                        st.success(f"✅ {best_id} dispatched (nearest idle)")
+                    else:
+                        st.error("❌ No route available")
                 else:
-                    st.warning("⚠️ All ambulances are busy!")
+                    st.warning("⚠️ All ambulances are busy")
         st.rerun()
 
-# ============================================================
+    # Sidebar fleet summary
+    st.divider()
+    st.subheader("🚑 Fleet Status")
+    for aid, a in st.session_state.fleet.items():
+        icon = {"Idle": "⚪", "En Route": "🟢", "Arrived": "🔵"}.get(
+            a["status"], "⚪"
+        )
+        st.caption(f"{icon} {aid}: {a['status']}")
+
+# ================================================================
 # GLOBAL AUTO-MOVEMENT ENGINE
-# ============================================================
+# ================================================================
 for amb_id, amb in st.session_state.fleet.items():
     sync_ambulance_state(amb)
     if amb["status"] == "Arrived":
@@ -374,531 +540,575 @@ if tick_ready:
         if amb["routes_data"] and amb["auto_drive"]:
             route = amb["routes_data"]["optimal_route"]
             last_idx = len(route) - 1
-
-            # Safety lock: never keep auto_drive active once arrived/final reached.
             if amb["status"] == "Arrived" or amb["step"] >= last_idx:
                 amb["auto_drive"] = False
                 sync_ambulance_state(amb)
                 continue
-
-            # Step progression is handled here; node/status are handled only in sync_ambulance_state.
             amb["step"] += 1
             if amb["step"] >= last_idx:
                 amb["auto_drive"] = False
             sync_ambulance_state(amb)
     st.session_state.last_move_ts = now_ts
 
+# Compute AFTER tick so it reflects the just-updated state
 any_auto_drive = any(
-    amb["auto_drive"] and amb["routes_data"] and amb["status"] != "Arrived"
-    for amb in st.session_state.fleet.values()
+    a["auto_drive"] and a["routes_data"] and a["status"] not in ("Arrived",)
+    for a in st.session_state.fleet.values()
 )
 
-# ============================================================
+
+# ================================================================
 # ADMIN DASHBOARD MODE
-# ============================================================
+# ================================================================
 if mode == "👨‍💼 Admin Dashboard":
     st.subheader("👨‍💼 Fleet Overview")
-    
-    # Fleet status table
-    fleet_data = []
-    for amb_id, amb in st.session_state.fleet.items():
-        if amb["routes_data"] and amb["status"] == "En Route":
-            route_len = len(amb["routes_data"]["optimal_route"])
-            progress = int((amb["step"] / max(route_len - 1, 1)) * 100)
+
+    fleet_rows = []
+    for aid, a in st.session_state.fleet.items():
+        if a["routes_data"] and a["status"] == "En Route":
+            rlen = len(a["routes_data"]["optimal_route"])
+            prog = int((a["step"] / max(rlen - 1, 1)) * 100)
         else:
-            progress = 0
-        
-        fleet_data.append({
-            "🚑 ID": amb_id,
-            "📊 Status": amb["status"],
-            "📈 Progress": f"{progress}%",
-            "🔄 Reroutes": amb["reroute_count"]
-        })
-    
-    st.dataframe(pd.DataFrame(fleet_data), use_container_width=True, hide_index=True)
-    
-    # Admin map showing all ambulances
+            prog = 100 if a["status"] == "Arrived" else 0
+        phase_label = ""
+        if a["phase"] == "ToPickup":
+            phase_label = "→ Pickup"
+        elif a["phase"] == "ToHospital":
+            phase_label = "→ Hospital"
+        fleet_rows.append(
+            {
+                "🚑 ID": aid,
+                "📊 Status": a["status"],
+                "🔀 Phase": phase_label,
+                "📈 Progress": f"{prog}%",
+                "🔄 Reroutes": a["reroute_count"],
+            }
+        )
+    st.dataframe(pd.DataFrame(fleet_rows), use_container_width=True, hide_index=True)
+
+    # --- Admin Map ---
     G = load_graph()
     if G:
-        # Calculate center from all active ambulances
         all_lats, all_lons = [], []
-        for amb in st.session_state.fleet.values():
-            if amb["routes_data"]:
-                route = amb["routes_data"]["optimal_route"]
-                all_lats.extend([G.nodes[n]['y'] for n in route])
-                all_lons.extend([G.nodes[n]['x'] for n in route])
-        
-        if all_lats:
-            center = [(min(all_lats) + max(all_lats)) / 2, (min(all_lons) + max(all_lons)) / 2]
-        else:
-            center = [13.0850, 80.2101]  # Default Anna Nagar
-        
-        m = folium.Map(location=center, zoom_start=16, control_scale=True)
-        
+        for a in st.session_state.fleet.values():
+            if a["routes_data"]:
+                for n in a["routes_data"]["optimal_route"]:
+                    all_lats.append(G.nodes[n]["y"])
+                    all_lons.append(G.nodes[n]["x"])
+
+        center = (
+            [(min(all_lats) + max(all_lats)) / 2, (min(all_lons) + max(all_lons)) / 2]
+            if all_lats
+            else [13.0850, 80.2101]
+        )
+
+        m = folium.Map(location=center, zoom_start=15, control_scale=True)
+
         # Emergency marker
         if st.session_state.current_emergency:
-            e_lat, e_lon = G.nodes[st.session_state.current_emergency]['y'], G.nodes[st.session_state.current_emergency]['x']
+            en = st.session_state.current_emergency
             folium.Marker(
-                location=(e_lat, e_lon),
-                popup="🚨 Emergency Location",
-                icon=folium.DivIcon(html='<div style="font-size: 36px; animation: blink 1s infinite;">🚨</div><style>@keyframes blink {0%, 100% {opacity: 1;} 50% {opacity: 0.3;}}</style>')
+                location=(G.nodes[en]["y"], G.nodes[en]["x"]),
+                popup="🚨 Emergency",
+                icon=folium.DivIcon(
+                    html=(
+                        '<div style="font-size:36px;animation:blink 1s infinite;">🚨</div>'
+                        "<style>@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}</style>"
+                    )
+                ),
             ).add_to(m)
-        
+
         # Draw each ambulance
-        for amb_id, amb in st.session_state.fleet.items():
-            if amb["routes_data"] and amb["status"] in ["En Route", "Arrived"]:
-                data = amb["routes_data"]
-                route = data["optimal_route"]
-                
-                # Draw old route if rerouted
-                if "old_route" in data:
-                    old_pts = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in data["old_route"]]
-                    folium.PolyLine(old_pts, color="gray", weight=2, opacity=0.4).add_to(m)
-                
-                # Draw current route
-                route_color = "orange" if amb["phase"] == "ToPickup" else "red"
-                pts = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in route]
-                phase_label = "→ Pickup" if amb["phase"] == "ToPickup" else "→ Hospital"
-                folium.PolyLine(pts, color=route_color, weight=4, opacity=0.7, tooltip=f"{amb_id} {phase_label}").add_to(m)
-                
-                # Ambulance marker
-                current_node = route[amb["step"]]
-                lat, lon = G.nodes[current_node]['y'], G.nodes[current_node]['x']
-                
-                if amb["step"] == len(route) - 1:
-                    icon_html = "🏁"
-                else:
-                    icon_html = "🚑"
-                
-                folium.Marker(
-                    location=(lat, lon),
-                    popup=f"{amb_id} - Step {amb['step']+1}/{len(route)}",
-                    icon=folium.DivIcon(html=f'<div style="font-size: 32px;">{icon_html}</div>')
+        for aid, a in st.session_state.fleet.items():
+            if a["routes_data"] and a["status"] in ("En Route", "Arrived"):
+                route = a["routes_data"]["optimal_route"]
+                color = "orange" if a["phase"] == "ToPickup" else "red"
+                label = "→ Pickup" if a["phase"] == "ToPickup" else "→ Hospital"
+
+                # Old route (gray) if rerouted
+                if "old_route" in a["routes_data"]:
+                    pts = [(G.nodes[n]["y"], G.nodes[n]["x"]) for n in a["routes_data"]["old_route"]]
+                    folium.PolyLine(pts, color="gray", weight=2, opacity=0.4).add_to(m)
+
+                pts = [(G.nodes[n]["y"], G.nodes[n]["x"]) for n in route]
+                folium.PolyLine(
+                    pts, color=color, weight=4, opacity=0.7, tooltip=f"{aid} {label}"
                 ).add_to(m)
-            elif amb["status"] == "Idle" and amb["node"]:
-                # Show idle ambulances
-                lat, lon = G.nodes[amb["node"]]['y'], G.nodes[amb["node"]]['x']
+
+                cur = route[a["step"]]
+                icon_txt = "🏁" if a["step"] == len(route) - 1 else "🚑"
                 folium.Marker(
-                    location=(lat, lon),
-                    popup=f"{amb_id} - Idle",
-                    icon=folium.DivIcon(html='<div style="font-size: 30px;">🚑</div>')
+                    location=(G.nodes[cur]["y"], G.nodes[cur]["x"]),
+                    popup=f"{aid} — Step {a['step']+1}/{len(route)}",
+                    icon=folium.DivIcon(
+                        html=f'<div style="font-size:32px;">{icon_txt}</div>'
+                    ),
                 ).add_to(m)
-        
+
+            elif a["status"] == "Idle" and a["node"]:
+                folium.Marker(
+                    location=(G.nodes[a["node"]]["y"], G.nodes[a["node"]]["x"]),
+                    popup=f"{aid} — Idle",
+                    icon=folium.DivIcon(
+                        html='<div style="font-size:28px;opacity:0.6;">🚑</div>'
+                    ),
+                ).add_to(m)
+
         st_folium(m, height=600, use_container_width=True)
 
-# ============================================================
+
+# ================================================================
 # AMBULANCE PANEL MODE
-# ============================================================
+# ================================================================
 else:
     amb = st.session_state.fleet[selected_ambulance]
-    
+
     if amb["routes_data"] is None:
-        st.info(f"🚑 {selected_ambulance} is currently Idle. Generate an emergency scenario to assign a route.")
+        st.info(
+            f"🚑 {selected_ambulance} is Idle. Generate an emergency scenario to dispatch."
+        )
         st.stop()
-    
+
     data = amb["routes_data"]
     G = data["G"]
-    max_idx = max(len(amb["routes_data"]["optimal_route"]) - 1, 0)
-    
-    amb["step"] = min(max(amb["step"], 0), max_idx)
-    route_steps = max(len(amb["routes_data"]["optimal_route"]) - 1, 1)
+    route = data["optimal_route"]
+    max_idx = max(len(route) - 1, 0)
+    amb["step"] = max(0, min(amb["step"], max_idx))
+    route_steps = max(max_idx, 1)
     progress = int((amb["step"] / route_steps) * 100)
-    
-    # ---------------- ANALYTICS PANEL ----------------
-    st.subheader(f"📊 {selected_ambulance} - Emergency Response Analytics")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
+
+    # ---- Analytics ----
+    phase_txt = "🚨 To Pickup" if amb["phase"] == "ToPickup" else "🏥 To Hospital"
+    st.subheader(f"📊 {selected_ambulance} — {phase_txt}")
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
         st.metric("📈 Progress", f"{progress}%")
-    with col2:
+    with c2:
         st.metric("🚑 Status", amb["status"])
-    with col3:
-        remaining = len(amb["routes_data"]["optimal_route"]) - amb["step"] - 1
-        st.metric("⏱️ Steps Left", remaining if remaining > 0 else "0")
-    with col4:
-        if len(amb["routes_data"]["optimal_route"]) > 1:
-            avg_congestion = np.mean([
-                G[amb["routes_data"]["optimal_route"][i]][amb["routes_data"]["optimal_route"][i+1]][0].get('congestion_factor', 1.0)
-                for i in range(len(amb["routes_data"]["optimal_route"]) - 1)
-            ])
+    with c3:
+        remaining = max(len(route) - amb["step"] - 1, 0)
+        st.metric("⏱️ Steps Left", remaining)
+    with c4:
+        if len(route) > 1:
+            cfs = [
+                _edge_attr(G, route[i], route[i + 1], "congestion_factor", 1.0)
+                for i in range(len(route) - 1)
+            ]
+            avg_cf = float(np.mean(cfs))
         else:
-            avg_congestion = 1.0
-        congestion_status = "🟢 Low" if avg_congestion < 1.3 else "🟡 Medium" if avg_congestion < 1.8 else "🔴 High"
-        st.metric("🚦 Congestion", congestion_status)
-    
-    # ---------------- TABS ----------------
+            avg_cf = 1.0
+        label = "🟢 Low" if avg_cf < 1.3 else ("🟡 Medium" if avg_cf < 1.8 else "🔴 High")
+        st.metric("🚦 Congestion", label)
+
+    # ---- Tabs: Hospital Analysis & Route Comparison ----
     tab1, tab2 = st.tabs(["🏥 Hospital Analysis", "🗺️ Route Comparison"])
-    
+
     with tab1:
         if "distances" in data and data["distances"]:
-            hospital_df = pd.DataFrame([
-                {"🏆 Rank": i+1, "🏥 Hospital ID": h, "📏 Distance (km)": round(d/1000, 2), 
-                 "📍 Status": "🎯 Selected" if h == data["destination"] else "⚪ Available"}
-                for i, (h, d) in enumerate(sorted(data["distances"].items(), key=lambda x: x[1]))
-            ])
-            st.dataframe(hospital_df, use_container_width=True, hide_index=True)
+            rows = []
+            for rank, (h, d) in enumerate(
+                sorted(data["distances"].items(), key=lambda x: x[1]), 1
+            ):
+                rows.append(
+                    {
+                        "🏆 Rank": rank,
+                        "🏥 Hospital Node": h,
+                        "📏 Distance (km)": round(d / 1000, 2),
+                        "📍 Status": "🎯 Selected"
+                        if h == data.get("destination")
+                        else "⚪ Available",
+                    }
+                )
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         else:
-            st.info("Hospital analysis will be available after patient pickup.")
-    
+            st.info("Hospital analysis available after patient pickup.")
+
     with tab2:
-        route_data = []
-        current_start = amb["routes_data"]["optimal_route"][0] if "old_route" in data else data["start"]
-        
-        try:
-            optimal_dist = nx.shortest_path_length(G, current_start, data["destination"], weight="dynamic_weight")
-        except nx.NetworkXNoPath:
-            optimal_dist = sum(
-                G[amb["routes_data"]["optimal_route"][j]][amb["routes_data"]["optimal_route"][j+1]][0].get('dynamic_weight', 0)
-                for j in range(len(amb["routes_data"]["optimal_route"]) - 1)
-            )
-        
-        route_data.append({
-            "🛣️ Route": "🎯 Optimal", 
-            "📏 Distance (km)": round(optimal_dist/1000, 2), 
-            "🔗 Nodes": len(amb["routes_data"]["optimal_route"]), 
-            "💡 Weight Type": "LSTM-based",
-            "📊 Status": "🟢 Active"
-        })
-        
-        for i, route in enumerate(data["alternate_routes"]):
+        rt_rows = []
+        # Optimal route distance
+        opt_dist = sum(
+            _edge_attr(G, route[j], route[j + 1], "dynamic_weight", 0)
+            for j in range(len(route) - 1)
+        )
+        rt_rows.append(
+            {
+                "🛣️ Route": "🎯 Optimal",
+                "📏 Distance (km)": round(opt_dist / 1000, 2),
+                "🔗 Nodes": len(route),
+                "💡 Weights": "LSTM-based",
+                "📊 Status": "🟢 Active",
+            }
+        )
+        for i, alt in enumerate(data.get("alternate_routes", [])):
             try:
-                alt_dist = sum(G[route[j]][route[j+1]][0].get('dynamic_weight', get_min_edge_length(G, route[j], route[j+1])) 
-                              for j in range(len(route)-1))
-                route_data.append({
-                    "🛣️ Route": f"🔄 Alternate {i+1}", 
-                    "📏 Distance (km)": round(alt_dist/1000, 2), 
-                    "🔗 Nodes": len(route), 
-                    "💡 Weight Type": "LSTM-based",
-                    "📊 Status": "🟡 Backup"
-                })
-            except (KeyError, IndexError, TypeError):
+                ad = sum(
+                    _edge_attr(G, alt[j], alt[j + 1], "dynamic_weight", 0)
+                    for j in range(len(alt) - 1)
+                )
+                rt_rows.append(
+                    {
+                        "🛣️ Route": f"🔄 Alternate {i+1}",
+                        "📏 Distance (km)": round(ad / 1000, 2),
+                        "🔗 Nodes": len(alt),
+                        "💡 Weights": "LSTM-based",
+                        "📊 Status": "🟡 Backup",
+                    }
+                )
+            except (KeyError, IndexError):
                 continue
-        
-        st.dataframe(pd.DataFrame(route_data), use_container_width=True, hide_index=True)
-    
-    # ---------------- MOVEMENT CONTROL ----------------
-    st.subheader("🚑 Ambulance Movement Control")
-    
-    # Accident simulation
-    if st.button("⚠️ Simulate Accident", type="secondary", use_container_width=True):
-        if amb["step"] > 0 and amb["step"] < len(amb["routes_data"]["optimal_route"]) - 1:
-            current_node = amb["routes_data"]["optimal_route"][amb["step"]]
-            old_route = data["optimal_route"].copy()
-            
-            if len(old_route) > 1:
-                old_congestion = np.mean([G[old_route[i]][old_route[i+1]][0].get('congestion_factor', 1.0) 
-                                          for i in range(len(old_route)-1)])
-                old_time = sum(G[old_route[i]][old_route[i+1]][0].get('dynamic_weight', 0) 
-                              for i in range(amb["step"], len(old_route)-1))
-            else:
-                old_congestion = 1.0
-                old_time = 0
-            
-            for i in range(amb["step"], len(amb["routes_data"]["optimal_route"]) - 1):
-                u, v = amb["routes_data"]["optimal_route"][i], amb["routes_data"]["optimal_route"][i+1]
+        st.dataframe(pd.DataFrame(rt_rows), use_container_width=True, hide_index=True)
+
+
+    # ---- Movement Controls ----
+    st.subheader("🚑 Movement Control")
+
+    # Accident simulation button
+    if st.button("⚠️ Simulate Accident on Route", type="secondary", use_container_width=True):
+        if 0 < amb["step"] < len(route) - 1:
+            current_node = route[amb["step"]]
+            old_route = route.copy()
+
+            # Calculate old metrics
+            old_cf = float(np.mean([
+                _edge_attr(G, old_route[i], old_route[i + 1], "congestion_factor", 1.0)
+                for i in range(len(old_route) - 1)
+            ])) if len(old_route) > 1 else 1.0
+            old_time = sum(
+                _edge_attr(G, old_route[i], old_route[i + 1], "dynamic_weight", 0)
+                for i in range(amb["step"], len(old_route) - 1)
+            )
+
+            # Spike congestion on remaining route edges
+            for i in range(amb["step"], len(route) - 1):
+                u, v = route[i], route[i + 1]
                 if G.has_edge(u, v):
-                    edge_data = G[u][v][0]
-                    edge_data['dynamic_weight'] = edge_data.get('length', 100) * 3.0
-                    edge_data['congestion_factor'] = 3.0
-            
+                    length = _edge_attr(G, u, v, "length", 100)
+                    attrs = _edge_attrs(G, u, v)
+                    attrs["dynamic_weight"] = length * 3.0
+                    attrs["congestion_factor"] = 3.0
+                    # Update edge — works for both Graph and MultiGraph
+                    nx.set_edge_attributes(G, {(u, v): attrs})
+
             try:
-                new_route = nx.shortest_path(G, current_node, data["destination"], weight="dynamic_weight")
-                
-                if new_route[0] == current_node:
-                    if len(new_route) > 1:
-                        new_congestion = np.mean([G[new_route[i]][new_route[i+1]][0].get('congestion_factor', 1.0) 
-                                                 for i in range(len(new_route)-1)])
-                        new_time = sum(G[new_route[i]][new_route[i+1]][0].get('dynamic_weight', 0) 
-                                      for i in range(len(new_route)-1))
-                    else:
-                        new_congestion = 1.0
-                        new_time = 0
-                    time_saved = old_time - new_time
-                    
-                    data["old_route"] = old_route
-                    data["optimal_route"] = new_route
-                    data["alternate_routes"] = build_alternate_routes(
-                        G, new_route, current_node, data["destination"], max_alternates=3
-                    )
-                    data["start"] = current_node
-                    new_lats = [G.nodes[n]['y'] for n in new_route]
-                    new_lons = [G.nodes[n]['x'] for n in new_route]
-                    data["center"] = [(min(new_lats) + max(new_lats)) / 2, (min(new_lons) + max(new_lons)) / 2]
-                    data["old_congestion"] = old_congestion
-                    data["new_congestion"] = new_congestion
-                    data["time_saved"] = time_saved
-                    
-                    amb["step"] = 0
-                    amb["auto_drive"] = False
-                    sync_ambulance_state(amb)
-                    amb["slider_override"] = True
-                    amb["reroute_count"] += 1
-                    amb["event_log"].append({
+                new_route = nx.shortest_path(
+                    G, current_node, data["destination"], weight="dynamic_weight"
+                )
+                new_cf = float(np.mean([
+                    _edge_attr(G, new_route[i], new_route[i + 1], "congestion_factor", 1.0)
+                    for i in range(len(new_route) - 1)
+                ])) if len(new_route) > 1 else 1.0
+                new_time = sum(
+                    _edge_attr(G, new_route[i], new_route[i + 1], "dynamic_weight", 0)
+                    for i in range(len(new_route) - 1)
+                )
+                time_saved = old_time - new_time
+
+                data["old_route"] = old_route
+                data["optimal_route"] = new_route
+                data["alternate_routes"] = build_alternate_routes(
+                    G, new_route, current_node, data["destination"]
+                )
+                data["start"] = current_node
+                lats = [G.nodes[n]["y"] for n in new_route]
+                lons = [G.nodes[n]["x"] for n in new_route]
+                data["center"] = [
+                    (min(lats) + max(lats)) / 2,
+                    (min(lons) + max(lons)) / 2,
+                ]
+                data["old_congestion"] = old_cf
+                data["new_congestion"] = new_cf
+                data["time_saved"] = time_saved
+
+                amb["step"] = 0
+                amb["auto_drive"] = False
+                amb["slider_override"] = True
+                amb["reroute_count"] += 1
+                amb["event_log"].append(
+                    {
                         "event": "Accident Detected",
                         "node": current_node,
-                        "old_congestion": old_congestion,
-                        "new_congestion": new_congestion,
-                        "time_saved": time_saved
-                    })
-                    st.success("✅ Route Adjusted Successfully")
-                    st.rerun()
-            except nx.NetworkXNoPath:
-                st.error("No alternate path available")
-    
-    can_generate_hospital_path = (
-        amb.get("phase") == "ToPickup"
-        and amb["step"] == len(amb["routes_data"]["optimal_route"]) - 1
-        and amb["node"] == amb.get("pickup_node")
-    )
-    if st.button("🏥 Generate Hospital Path from Pickup", use_container_width=True, disabled=not can_generate_hospital_path):
-        G = data["G"]
-        hospital_nodes = data["hospital_nodes"]
-        pickup_node = amb["pickup_node"]
-        
-        distances = {}
-        for h in hospital_nodes:
-            try:
-                distances[h] = nx.shortest_path_length(G, pickup_node, h, weight="dynamic_weight")
-            except nx.NetworkXNoPath:
-                continue
-        
-        if distances:
-            nearest_hospital = min(distances, key=distances.get)
-            try:
-                route_to_hospital = nx.shortest_path(G, pickup_node, nearest_hospital, weight="dynamic_weight")
-                
-                # Compute alternate routes for pickup -> hospital phase and show them on map.
-                alternate_routes = build_alternate_routes(
-                    G, route_to_hospital, pickup_node, nearest_hospital, max_alternates=3
+                        "old_congestion": old_cf,
+                        "new_congestion": new_cf,
+                        "time_saved": time_saved,
+                    }
                 )
-                
-                data["optimal_route"] = route_to_hospital
-                data["start"] = pickup_node
-                data["destination"] = nearest_hospital
-                data["distances"] = distances
-                data["alternate_routes"] = alternate_routes
-                data["center"] = [(G.nodes[pickup_node]['y'] + G.nodes[nearest_hospital]['y'])/2,
-                                  (G.nodes[pickup_node]['x'] + G.nodes[nearest_hospital]['x'])/2]
-                amb["step"] = 0
-                amb["phase"] = "ToHospital"
-                amb["destination_hospital"] = nearest_hospital
-                amb["event_log"].append({"event": "Patient Picked Up", "node": pickup_node})
-                amb["auto_drive"] = False
                 sync_ambulance_state(amb)
-                st.success("✅ Hospital route generated. Press Start to begin auto movement.")
+                st.success("✅ Route rerouted around accident")
                 st.rerun()
             except nx.NetworkXNoPath:
-                st.error("No path to hospital from pickup node.")
+                st.error("No alternate path available")
+        else:
+            st.warning("Move the ambulance a few steps first before simulating an accident.")
 
+    # Hospital path generation (only at pickup)
+    can_gen_hospital = (
+        amb.get("phase") == "ToPickup"
+        and amb["step"] == len(route) - 1
+        and amb["node"] == amb.get("pickup_node")
+    )
+    if st.button(
+        "🏥 Generate Hospital Path from Pickup",
+        use_container_width=True,
+        disabled=not can_gen_hospital,
+    ):
+        pickup = amb["pickup_node"]
+        dists = {}
+        for h in data["hospital_nodes"]:
+            try:
+                dists[h] = nx.shortest_path_length(G, pickup, h, weight="dynamic_weight")
+            except nx.NetworkXNoPath:
+                continue
+        if dists:
+            nearest_h = min(dists, key=dists.get)
+            try:
+                hosp_route = nx.shortest_path(G, pickup, nearest_h, weight="dynamic_weight")
+                alts = build_alternate_routes(G, hosp_route, pickup, nearest_h)
+                data["optimal_route"] = hosp_route
+                data["start"] = pickup
+                data["destination"] = nearest_h
+                data["distances"] = dists
+                data["alternate_routes"] = alts
+                data["center"] = [
+                    (G.nodes[pickup]["y"] + G.nodes[nearest_h]["y"]) / 2,
+                    (G.nodes[pickup]["x"] + G.nodes[nearest_h]["x"]) / 2,
+                ]
+                amb["step"] = 0
+                amb["phase"] = "ToHospital"
+                amb["destination_hospital"] = nearest_h
+                amb["event_log"].append({"event": "Patient Picked Up", "node": pickup})
+                amb["auto_drive"] = False
+                sync_ambulance_state(amb)
+                st.success("✅ Hospital route generated. Press ▶️ Start.")
+                st.rerun()
+            except nx.NetworkXNoPath:
+                st.error("No path to hospital from pickup.")
+        else:
+            st.error("No reachable hospitals found.")
+
+    # Navigation buttons
+    route = data["optimal_route"]  # refresh after possible reroute
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        start_disabled = amb["status"] == "Arrived" and amb["phase"] == "ToHospital"
-        if st.button("⏮️ Start", use_container_width=True, disabled=start_disabled):
+        start_dis = amb["status"] == "Arrived" and amb["phase"] == "ToHospital"
+        if st.button("▶️ Start", use_container_width=True, disabled=start_dis):
             amb["auto_drive"] = True
             st.rerun()
-    
     with col2:
-        if st.button("⬅️ Previous", disabled=amb["step"] == 0, use_container_width=True):
+        if st.button("⬅️ Prev", disabled=amb["step"] == 0, use_container_width=True):
             amb["auto_drive"] = False
             amb["step"] -= 1
             sync_ambulance_state(amb)
             st.rerun()
-    
     with col3:
-        if st.button("➡️ Next", disabled=amb["step"] == len(amb["routes_data"]["optimal_route"]) - 1, use_container_width=True):
+        if st.button(
+            "➡️ Next",
+            disabled=amb["step"] >= len(route) - 1,
+            use_container_width=True,
+        ):
             amb["auto_drive"] = False
             amb["step"] += 1
             sync_ambulance_state(amb)
             st.rerun()
-    
     with col4:
-        end_disabled = amb["step"] == len(amb["routes_data"]["optimal_route"]) - 1
-        if st.button("⏭️ End", disabled=end_disabled, use_container_width=True):
-            amb["step"] = len(amb["routes_data"]["optimal_route"]) - 1
+        if st.button(
+            "⏭️ End",
+            disabled=amb["step"] >= len(route) - 1,
+            use_container_width=True,
+        ):
+            amb["step"] = len(route) - 1
             sync_ambulance_state(amb)
             st.rerun()
-    
-    if "slider_override" not in amb:
+
+    # Slider
+    if amb.get("slider_override"):
         amb["slider_override"] = False
-    
-    if amb["slider_override"]:
-        amb["slider_override"] = False
-    
-    slider_step = st.slider("🚑 Ambulance Position", 0, max(len(amb["routes_data"]["optimal_route"])-1, 1), amb["step"], key=f"slider_{selected_ambulance}")
-    if not amb["auto_drive"] and not amb["slider_override"] and slider_step != amb["step"]:
-        amb["step"] = slider_step
+
+    slider_max = max(len(route) - 1, 1)
+    slider_val = st.slider(
+        "🚑 Position on Route",
+        0,
+        slider_max,
+        min(amb["step"], slider_max),
+        key=f"slider_{selected_ambulance}_{len(route)}",
+    )
+    # Only apply slider changes during manual control — never when auto-driving
+    # or when the ambulance has already arrived (prevents reset-to-0 bug).
+    if (
+        not amb["auto_drive"]
+        and not amb.get("slider_override")
+        and amb["status"] != "Arrived"
+        and slider_val != amb["step"]
+    ):
+        amb["step"] = slider_val
         sync_ambulance_state(amb)
-    
-    # ---------------- REROUTE LOG ----------------
+
+
+    # ---- Reroute Event Log ----
     if amb["reroute_count"] > 0 or amb["event_log"]:
-        st.subheader("📜 Reroute Event Log")
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
+        st.subheader("📜 Event Log")
+        mc1, mc2, mc3 = st.columns(3)
+        with mc1:
             st.metric("🔄 Total Reroutes", amb["reroute_count"])
-        with col2:
-            if "old_congestion" in data and "new_congestion" in data:
-                congestion_change = ((data["new_congestion"] - data["old_congestion"]) / data["old_congestion"]) * 100
-                st.metric("🚦 Congestion Change", f"{congestion_change:+.1f}%")
-        with col3:
+        with mc2:
+            if "old_congestion" in data and "new_congestion" in data and data["old_congestion"] > 0:
+                pct = ((data["new_congestion"] - data["old_congestion"]) / data["old_congestion"]) * 100
+                st.metric("🚦 Congestion Δ", f"{pct:+.1f}%")
+        with mc3:
             if "time_saved" in data:
                 st.metric("⏱️ Time Impact", f"{abs(data['time_saved']):.0f}s")
-        
+
         if amb["event_log"]:
-            with st.expander("📝 View Event Details", expanded=True):
-                for idx, event in enumerate(reversed(amb["event_log"])):
-                    if event["event"] == "Patient Picked Up":
-                        st.markdown(f"""
-                        **Event #{len(amb['event_log']) - idx}:**
-                        - 📍 {event['event']} at Node `{event['node']}`
-                        ---
-                        """)
+            with st.expander("📝 Event Details", expanded=True):
+                for idx, ev in enumerate(reversed(amb["event_log"])):
+                    num = len(amb["event_log"]) - idx
+                    if ev["event"] == "Patient Picked Up":
+                        st.markdown(
+                            f"**#{num}** — 📍 {ev['event']} at node `{ev['node']}`"
+                        )
                     else:
-                        st.markdown(f"""
-                        **Event #{len(amb['event_log']) - idx}:**
-                        - ⚠️ {event['event']} at Node `{event['node']}`
-                        - 🚦 Congestion: {event.get('old_congestion', 0):.2f} → {event.get('new_congestion', 0):.2f}
-                        - ⏱️ Time: {abs(event.get('time_saved', 0)):.0f}s {'saved' if event.get('time_saved', 0) > 0 else 'added'}
-                        ---
-                        """)
-    
-    # ---------------- MAP ----------------
-    current_node = amb["routes_data"]["optimal_route"][amb["step"]]
-    lat, lon = G.nodes[current_node]['y'], G.nodes[current_node]['x']
-    
+                        saved_label = (
+                            "saved" if ev.get("time_saved", 0) > 0 else "added"
+                        )
+                        st.markdown(
+                            f"**#{num}** — ⚠️ {ev['event']} at node `{ev['node']}`  \n"
+                            f"Congestion: {ev.get('old_congestion',0):.2f} → {ev.get('new_congestion',0):.2f} · "
+                            f"Time: {abs(ev.get('time_saved',0)):.0f}s {saved_label}"
+                        )
+                    st.divider()
+
+    # ---- Map ----
+    route = data["optimal_route"]
+    current_node = route[amb["step"]]
+    lat, lon = G.nodes[current_node]["y"], G.nodes[current_node]["x"]
+
     m = folium.Map(location=data["center"], zoom_start=15, control_scale=True)
-    
-    route_colors = ["blue", "green", "orange", "purple"]
-    for idx, route in enumerate(data["alternate_routes"]):
-        if idx < len(route_colors):
-            pts = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in route]
-            folium.PolyLine(pts, color=route_colors[idx], weight=4, opacity=0.7, tooltip=f"Alternate Route {idx+1}").add_to(m)
-    
+
+    # Alternate routes
+    alt_colors = ["blue", "green", "orange", "purple"]
+    for idx, alt in enumerate(data.get("alternate_routes", [])):
+        if idx < len(alt_colors):
+            pts = [(G.nodes[n]["y"], G.nodes[n]["x"]) for n in alt]
+            folium.PolyLine(
+                pts, color=alt_colors[idx], weight=4, opacity=0.6,
+                tooltip=f"Alternate {idx+1}",
+            ).add_to(m)
+
+    # Old route (gray)
     if "old_route" in data:
-        old_pts = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in data["old_route"]]
-        folium.PolyLine(old_pts, color="gray", weight=4, opacity=0.5, tooltip="Previous Route").add_to(m)
-    
-    optimal_pts = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in amb["routes_data"]["optimal_route"]]
-    folium.PolyLine(optimal_pts, color="red", weight=5, opacity=0.85, tooltip="🚑 Optimal Route").add_to(m)
-    
-    start_node = data["start"]
+        pts = [(G.nodes[n]["y"], G.nodes[n]["x"]) for n in data["old_route"]]
+        folium.PolyLine(pts, color="gray", weight=3, opacity=0.4, tooltip="Previous Route").add_to(m)
+
+    # Optimal route (red)
+    opt_pts = [(G.nodes[n]["y"], G.nodes[n]["x"]) for n in route]
+    folium.PolyLine(opt_pts, color="red", weight=5, opacity=0.85, tooltip="🚑 Optimal Route").add_to(m)
+
+    # Start marker
+    sn = data["start"]
     folium.Marker(
-        location=(G.nodes[start_node]['y'], G.nodes[start_node]['x']),
+        location=(G.nodes[sn]["y"], G.nodes[sn]["x"]),
         popup="🏁 Start",
-        icon=folium.Icon(color="green", icon="play")
+        icon=folium.Icon(color="green", icon="play"),
     ).add_to(m)
-    
-    # Show emergency/pickup marker if in ToPickup phase
-    if amb["phase"] == "ToPickup" and amb["pickup_node"]:
-        p_lat, p_lon = G.nodes[amb["pickup_node"]]['y'], G.nodes[amb["pickup_node"]]['x']
+
+    # Emergency / pickup marker
+    if amb["phase"] == "ToPickup" and amb.get("pickup_node"):
+        pn = amb["pickup_node"]
         folium.Marker(
-            location=(p_lat, p_lon),
-            popup="🚨 Emergency Pickup Location",
-            icon=folium.DivIcon(html='<div style="font-size: 36px; animation: blink 1s infinite;">🚨</div><style>@keyframes blink {0%, 100% {opacity: 1;} 50% {opacity: 0.3;}}</style>')
+            location=(G.nodes[pn]["y"], G.nodes[pn]["x"]),
+            popup="🚨 Emergency Pickup",
+            icon=folium.DivIcon(
+                html=(
+                    '<div style="font-size:36px;animation:blink 1s infinite;">🚨</div>'
+                    "<style>@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}</style>"
+                )
+            ),
         ).add_to(m)
-    
-    # Show hospitals
-    for idx, h in enumerate(data["hospital_nodes"]):
-        is_destination = h == data.get("destination")
-        hosp_lat, hosp_lon = G.nodes[h]['y'], G.nodes[h]['x']
-        
-        if is_destination and amb["phase"] == "ToHospital":
-            folium.CircleMarker(
-                location=(hosp_lat, hosp_lon),
-                radius=12,
-                color="red",
-                fill=True,
-                fillColor="#ff7f7f",
-                fillOpacity=0.55,
-                popup="🏥 Destination Hospital",
-                weight=2
-            ).add_to(m)
-        else:
-            folium.CircleMarker(
-                location=(hosp_lat, hosp_lon),
-                radius=8,
-                color="blue",
-                fill=True,
-                fillColor="lightblue",
-                fillOpacity=0.7,
-                popup="🏥 Hospital Entrance",
-                weight=2
-            ).add_to(m)
-    
-    ambulance_html = f"""
-    <div style="font-size: 42px; text-shadow: 2px 2px 4px rgba(0,0,0,0.6); animation: pulse 2s infinite;">🚑</div>
-    <style>
-    @keyframes pulse {{ 0% {{ transform: scale(1); }} 50% {{ transform: scale(1.1); }} 100% {{ transform: scale(1); }} }}
-    </style>
-    """
+
+    # Hospital markers
+    for h in data["hospital_nodes"]:
+        is_dest = h == data.get("destination") and amb["phase"] == "ToHospital"
+        folium.CircleMarker(
+            location=(G.nodes[h]["y"], G.nodes[h]["x"]),
+            radius=12 if is_dest else 8,
+            color="red" if is_dest else "blue",
+            fill=True,
+            fillColor="#ff7f7f" if is_dest else "lightblue",
+            fillOpacity=0.6,
+            popup="🏥 Destination" if is_dest else "🏥 Hospital",
+            weight=2,
+        ).add_to(m)
+
+    # Ambulance marker
     folium.Marker(
         location=(lat, lon),
-        popup=f"🚑 {selected_ambulance} - Step {amb['step']+1}/{len(amb['routes_data']['optimal_route'])}",
-        icon=folium.DivIcon(html=ambulance_html, icon_size=(56, 56), icon_anchor=(28, 28))
+        popup=f"🚑 {selected_ambulance} — Step {amb['step']+1}/{len(route)}",
+        icon=folium.DivIcon(
+            html=(
+                '<div style="font-size:42px;text-shadow:2px 2px 4px rgba(0,0,0,.6);'
+                'animation:pulse 2s infinite;">🚑</div>'
+                "<style>@keyframes pulse{0%{transform:scale(1)}50%{transform:scale(1.1)}"
+                "100%{transform:scale(1)}}</style>"
+            ),
+            icon_size=(56, 56),
+            icon_anchor=(28, 28),
+        ),
     ).add_to(m)
-    
-    st_folium(m, height=700, use_container_width=True)
-    
-    # ---------------- MAP LEGEND ----------------
+
+    st_folium(m, height=650, use_container_width=True)
+
+    # ---- Legend ----
     st.subheader("🗺️ Map Legend")
     l1, l2, l3 = st.columns(3)
     with l1:
-        st.markdown("`🚑` Ambulance")
-        st.markdown("`🔴` Optimal Route")
+        st.markdown("`🚑` Ambulance  \n`🔴` Optimal Route")
         if "old_route" in data:
             st.markdown("`⚫` Previous Route")
     with l2:
-        st.markdown("`🔵` Alternate Route 1")
-        st.markdown("`🟢` Alternate Route 2")
-        st.markdown("`🟠` Alternate Route 3")
+        st.markdown("`🔵` Alt Route 1  \n`🟢` Alt Route 2  \n`🟠` Alt Route 3")
     with l3:
-        st.markdown("`🏁` Route Start")
-        st.markdown("`🏥` Destination Hospital")
-        st.markdown("`🔹` Other Hospitals")
-    
-    # ---------------- STATUS ----------------
+        st.markdown("`🏁` Start  \n`🏥` Hospital  \n`🚨` Emergency")
+
+    # ---- Mission Status ----
     st.subheader("📊 Mission Status")
     st.progress(progress, text=f"🚑 Mission Progress: {progress}%")
-    
+
     if amb["step"] == 0:
         if amb["phase"] == "ToPickup":
-            st.info("🚨 Ambulance dispatched to pickup location")
+            st.info("🚨 Dispatched to pickup location")
         elif amb["phase"] == "ToHospital":
             st.info("🏥 Transporting patient to hospital")
-        else:
-            st.info("🚨 Emergency dispatch initiated")
-    elif amb["step"] == len(amb["routes_data"]["optimal_route"]) - 1:
+    elif amb["step"] >= len(route) - 1:
         if amb["phase"] == "ToPickup":
-            st.warning("📍 Patient picked up. Click ▶️ Start to continue to hospital.")
+            st.warning("📍 At pickup. Click 🏥 Generate Hospital Path to continue.")
         elif amb["phase"] == "ToHospital":
-            st.success("✅ Ambulance arrived at hospital!")
+            st.success("✅ Arrived at hospital!")
         else:
-            st.success("✅ Ambulance arrived at destination!")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("📍 Current Step", f"{amb['step']+1}/{len(amb['routes_data']['optimal_route'])}")
-    with col2:
+            st.success("✅ Arrived at destination!")
+
+    sc1, sc2, sc3, sc4 = st.columns(4)
+    with sc1:
+        st.metric("📍 Step", f"{amb['step']+1}/{len(route)}")
+    with sc2:
         st.metric("📈 Progress", f"{progress}%")
-    with col3:
-        if "old_route" in data:
-            total_distance = sum(
-                G[amb["routes_data"]["optimal_route"][j]][amb["routes_data"]["optimal_route"][j+1]][0].get('length', 0)
-                for j in range(len(amb["routes_data"]["optimal_route"]) - 1)
-            )
-        else:
-            total_distance = nx.shortest_path_length(G, data["start"], data["destination"], weight="length")
-        st.metric("📏 Total Distance", f"{total_distance/1000:.1f} km")
-    with col4:
-        if amb["step"] == len(amb["routes_data"]["optimal_route"])-1:
+    with sc3:
+        total_dist = sum(
+            _edge_attr(G, route[j], route[j + 1], "length", 0)
+            for j in range(len(route) - 1)
+        )
+        st.metric("📏 Distance", f"{total_dist/1000:.1f} km")
+    with sc4:
+        rem = max(len(route) - amb["step"] - 1, 0)
+        if rem == 0:
             st.success("🏁 ARRIVED")
         else:
-            remaining = len(amb["routes_data"]["optimal_route"]) - amb["step"] - 1
-            st.info(f"⏱️ {remaining} steps left")
-    
+            st.info(f"⏱️ {rem} steps left")
+
+# ================================================================
+# AUTO-DRIVE RERUN LOOP
+# ================================================================
 if any_auto_drive:
     sleep_for = max(0.0, MOVE_INTERVAL_SEC - (time.time() - st.session_state.last_move_ts))
     if sleep_for > 0:
         time.sleep(sleep_for)
     st.rerun()
-    
