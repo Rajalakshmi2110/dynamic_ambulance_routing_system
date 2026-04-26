@@ -906,16 +906,15 @@ if mode == "Admin Dashboard":
                     '<div style="width:14px;height:14px;background:#2ecc71;border-radius:50%;'
                     'border:2px solid #fff;box-shadow:0 2px 4px rgba(0,0,0,.3);"></div>'
                     if a["step"] == len(route) - 1
-                    else '<div style="width:16px;height:16px;background:#e74c3c;border-radius:50%;'
-                    'border:3px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.4);"></div>'
+                    else '<div style="font-size:28px;filter:drop-shadow(1px 1px 2px rgba(0,0,0,.4));">🚑</div>'
                 )
                 folium.Marker(
                     location=(G.nodes[cur]["y"], G.nodes[cur]["x"]),
                     popup=f"{aid} — Step {a['step']+1}/{len(route)}",
                     icon=folium.DivIcon(
                         html=icon_txt_html,
-                        icon_size=(16, 16),
-                        icon_anchor=(8, 8),
+                        icon_size=(28, 28),
+                        icon_anchor=(14, 14),
                     ),
                 ).add_to(m)
 
@@ -1341,15 +1340,14 @@ else:
         popup=f"{selected_ambulance} — Step {amb['step']+1}/{len(route)}",
         icon=folium.DivIcon(
             html=(
-                '<div style="width:22px;height:22px;background:linear-gradient(135deg,#e74c3c,#c0392b);'
-                'border-radius:50%;border:3px solid #fff;box-shadow:0 3px 10px rgba(231,76,60,.5);'
-                'animation:pulse 2s infinite;"></div>'
-                "<style>@keyframes pulse{0%{transform:scale(1);box-shadow:0 3px 10px rgba(231,76,60,.5)}"
-                "50%{transform:scale(1.15);box-shadow:0 4px 16px rgba(231,76,60,.7)}"
-                "100%{transform:scale(1);box-shadow:0 3px 10px rgba(231,76,60,.5)}}</style>"
+                '<div style="font-size:36px;filter:drop-shadow(2px 2px 4px rgba(0,0,0,.5));'
+                'animation:pulse 2s infinite;">🚑</div>'
+                "<style>@keyframes pulse{0%{transform:scale(1)}"
+                "50%{transform:scale(1.12)}"
+                "100%{transform:scale(1)}}</style>"
             ),
-            icon_size=(22, 22),
-            icon_anchor=(11, 11),
+            icon_size=(36, 36),
+            icon_anchor=(18, 18),
         ),
     ).add_to(m)
 
