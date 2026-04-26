@@ -20,46 +20,265 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ---------------- PAGE CONFIG ----------------
-st.set_page_config(layout="wide", page_title="🚑 Ambulance Routing Dashboard", page_icon="🚑")
+st.set_page_config(layout="wide", page_title="Ambulance Routing Dashboard", page_icon="+")
 
 # ---------------- CUSTOM CSS ----------------
 st.markdown("""
 <style>
+    /* ---- Global ---- */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+    html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+    .block-container { padding-top: 1rem; }
+
+    /* ---- Header ---- */
     .main-header {
-        background: linear-gradient(135deg, #e63946 0%, #d62828 50%, #c1121f 100%);
-        padding: 1.2rem 1.5rem;
-        border-radius: 12px;
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 40%, #0f3460 100%);
+        padding: 1.4rem 2rem;
+        border-radius: 16px;
         color: white;
         text-align: center;
-        margin-bottom: 1.2rem;
-        box-shadow: 0 4px 15px rgba(230, 57, 70, 0.3);
+        margin-bottom: 1.5rem;
+        box-shadow: 0 8px 32px rgba(15, 52, 96, 0.35);
+        border: 1px solid rgba(255,255,255,0.08);
+        position: relative;
+        overflow: hidden;
     }
-    .main-header h1 { margin: 0; font-size: 1.8rem; font-weight: 700; }
-    .main-header p { margin: 0.3rem 0 0 0; font-size: 0.95rem; opacity: 0.9; }
-    .status-card {
-        background: #f8f9fa;
-        border-radius: 10px;
-        padding: 0.8rem;
-        border-left: 4px solid #e63946;
+    .main-header::before {
+        content: '';
+        position: absolute;
+        top: -50%;
+        left: -50%;
+        width: 200%;
+        height: 200%;
+        background: radial-gradient(circle, rgba(231,76,60,0.08) 0%, transparent 70%);
+        animation: headerGlow 6s ease-in-out infinite;
+    }
+    @keyframes headerGlow {
+        0%, 100% { transform: translate(0, 0); }
+        50% { transform: translate(5%, 5%); }
+    }
+    .main-header h1 {
+        margin: 0;
+        font-size: 2rem;
+        font-weight: 800;
+        letter-spacing: -0.5px;
+        position: relative;
+        z-index: 1;
+    }
+    .main-header p {
+        margin: 0.4rem 0 0 0;
+        font-size: 0.9rem;
+        opacity: 0.75;
+        font-weight: 400;
+        letter-spacing: 0.5px;
+        position: relative;
+        z-index: 1;
+    }
+    .header-badge {
+        display: inline-block;
+        background: rgba(231,76,60,0.2);
+        border: 1px solid rgba(231,76,60,0.4);
+        color: #e74c3c;
+        padding: 0.2rem 0.7rem;
+        border-radius: 20px;
+        font-size: 0.7rem;
+        font-weight: 600;
+        letter-spacing: 1px;
+        text-transform: uppercase;
         margin-bottom: 0.5rem;
+        position: relative;
+        z-index: 1;
     }
+
+    /* ---- Metric Cards ---- */
     div[data-testid="stMetric"] {
-        background: #f8f9fa;
-        border-radius: 8px;
-        padding: 0.6rem 0.8rem;
-        border: 1px solid #e9ecef;
+        background: linear-gradient(135deg, #f8f9fc 0%, #eef1f8 100%);
+        border-radius: 12px;
+        padding: 0.9rem 1rem;
+        border: 1px solid #e2e8f0;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
     }
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+    div[data-testid="stMetric"]:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+    }
+    div[data-testid="stMetric"] label {
+        font-size: 0.75rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: #64748b;
+    }
+    div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+        font-size: 1.4rem;
+        font-weight: 700;
+        color: #1e293b;
+    }
+
+    /* ---- Tabs ---- */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 4px;
+        background: #f1f5f9;
+        border-radius: 12px;
+        padding: 4px;
+    }
     .stTabs [data-baseweb="tab"] {
-        border-radius: 8px 8px 0 0;
-        padding: 8px 16px;
+        border-radius: 10px;
+        padding: 8px 20px;
+        font-weight: 600;
+        font-size: 0.85rem;
+    }
+    .stTabs [aria-selected="true"] {
+        background: white;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+
+    /* ---- Buttons ---- */
+    .stButton > button {
+        border-radius: 10px;
+        font-weight: 600;
+        font-size: 0.85rem;
+        padding: 0.5rem 1rem;
+        transition: all 0.2s ease;
+        border: 1px solid #e2e8f0;
+    }
+    .stButton > button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    }
+    .stButton > button[kind="primary"] {
+        background: linear-gradient(135deg, #e74c3c, #c0392b);
+        border: none;
+        color: white;
+    }
+    .stButton > button[kind="primary"]:hover {
+        background: linear-gradient(135deg, #c0392b, #a93226);
+    }
+
+    /* ---- DataFrames ---- */
+    .stDataFrame { border-radius: 12px; overflow: hidden; }
+    .stDataFrame [data-testid="stDataFrameResizable"] {
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+    }
+
+    /* ---- Sidebar ---- */
+    section[data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #1a1a2e 0%, #16213e 100%);
+    }
+    section[data-testid="stSidebar"] * {
+        color: #e2e8f0;
+    }
+    section[data-testid="stSidebar"] .stRadio label,
+    section[data-testid="stSidebar"] .stSelectbox label {
+        color: #94a3b8;
+        font-weight: 600;
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    section[data-testid="stSidebar"] hr {
+        border-color: rgba(255,255,255,0.1);
+    }
+
+    /* ---- Progress Bar ---- */
+    .stProgress > div > div {
+        background: linear-gradient(90deg, #e74c3c, #f39c12);
+        border-radius: 10px;
+    }
+    .stProgress > div {
+        background: #e2e8f0;
+        border-radius: 10px;
+    }
+
+    /* ---- Expander ---- */
+    .streamlit-expanderHeader {
+        font-weight: 600;
+        font-size: 0.9rem;
+        border-radius: 10px;
+    }
+
+    /* ---- Slider ---- */
+    .stSlider [data-baseweb="slider"] [role="slider"] {
+        background: #e74c3c;
+        border: 2px solid white;
+        box-shadow: 0 2px 8px rgba(231,76,60,0.3);
+    }
+    .stSlider [data-baseweb="slider"] [data-testid="stTickBar"] {
+        background: linear-gradient(90deg, #e74c3c, #f39c12);
+    }
+
+    /* ---- Fleet Card (sidebar) ---- */
+    .fleet-card {
+        background: rgba(255,255,255,0.06);
+        border: 1px solid rgba(255,255,255,0.1);
+        border-radius: 10px;
+        padding: 0.5rem 0.75rem;
+        margin-bottom: 0.4rem;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    }
+    .fleet-card .fc-id {
+        font-weight: 700;
+        font-size: 0.9rem;
+    }
+    .fleet-card .fc-status {
+        font-size: 0.75rem;
+        padding: 0.15rem 0.5rem;
+        border-radius: 20px;
+        font-weight: 600;
+    }
+    .fc-idle { background: rgba(148,163,184,0.2); color: #94a3b8; }
+    .fc-enroute { background: rgba(46,204,113,0.2); color: #2ecc71; }
+    .fc-arrived { background: rgba(52,152,219,0.2); color: #3498db; }
+
+    /* ---- Section Headers ---- */
+    .section-header {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin: 1.2rem 0 0.8rem 0;
+        padding-bottom: 0.5rem;
+        border-bottom: 2px solid #e2e8f0;
+    }
+    .section-header h3 {
+        margin: 0;
+        font-size: 1.1rem;
+        font-weight: 700;
+        color: #1e293b;
+    }
+
+    /* ---- Alert Boxes ---- */
+    .stAlert { border-radius: 10px; }
+
+    /* ---- Legend ---- */
+    .legend-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        padding: 0.3rem 0.6rem;
+        background: #f8f9fc;
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        font-size: 0.8rem;
+        font-weight: 500;
+        margin: 0.2rem;
+    }
+    .legend-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        display: inline-block;
     }
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown(
     '<div class="main-header">'
-    "<h1>🚑 Smart Ambulance Routing Dashboard</h1>"
+    '<span class="header-badge">● LIVE</span>'
+    "<h1>Smart Ambulance Routing</h1>"
     "<p>Real-Time Emergency Navigation — Anna Nagar, Chennai</p>"
     "</div>",
     unsafe_allow_html=True,
@@ -454,18 +673,26 @@ if "current_emergency" not in st.session_state:
 # SIDEBAR — MODE SELECTION & EMERGENCY DISPATCH
 # ================================================================
 with st.sidebar:
-    st.header("🎛️ Control Panel")
-    mode = st.radio("Select View Mode", ["👨‍💼 Admin Dashboard", "🚑 Ambulance Panel"])
+    st.markdown(
+        '<div style="text-align:center;padding:0.5rem 0 1rem 0;">'
+        '<div style="width:40px;height:40px;background:linear-gradient(135deg,#e74c3c,#c0392b);'
+        'border-radius:10px;display:inline-flex;align-items:center;justify-content:center;'
+        'color:white;font-size:1.2rem;font-weight:800;">+</div><br>'
+        '<span style="font-size:1.1rem;font-weight:800;letter-spacing:-0.5px;">Command Center</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    mode = st.radio("View Mode", ["Admin Dashboard", "Ambulance Panel"])
 
-    if mode == "🚑 Ambulance Panel":
+    if mode == "Ambulance Panel":
         selected_ambulance = st.selectbox(
-            "Select Ambulance", list(st.session_state.fleet.keys())
+            "Select Unit", list(st.session_state.fleet.keys())
         )
 
     st.divider()
 
     if st.button(
-        "🔄 Generate New Emergency Scenario",
+        "New Emergency Dispatch",
         type="primary",
         use_container_width=True,
     ):
@@ -476,13 +703,13 @@ with st.sidebar:
             emergency_node = random.choice(list(G.nodes))
             st.session_state.current_emergency = emergency_node
 
-            if mode == "🚑 Ambulance Panel":
+            if mode == "Ambulance Panel":
                 if assign_emergency_to_ambulance(
                     selected_ambulance, scenario_data, emergency_node
                 ):
-                    st.success(f"✅ {selected_ambulance} dispatched to pickup")
+                    st.success(f"{selected_ambulance} dispatched to pickup")
                 else:
-                    st.error(f"❌ No route for {selected_ambulance}")
+                    st.error(f"No route for {selected_ambulance}")
             else:
                 # Admin mode: auto-dispatch nearest idle ambulance
                 idle = [
@@ -507,21 +734,32 @@ with st.sidebar:
                     if best_id and assign_emergency_to_ambulance(
                         best_id, scenario_data, emergency_node
                     ):
-                        st.success(f"✅ {best_id} dispatched (nearest idle)")
+                        st.success(f"{best_id} dispatched (nearest idle)")
                     else:
-                        st.error("❌ No route available")
+                        st.error("No route available")
                 else:
-                    st.warning("⚠️ All ambulances are busy")
+                    st.warning("All ambulances are busy")
         st.rerun()
 
     # Sidebar fleet summary
     st.divider()
-    st.subheader("🚑 Fleet Status")
+    st.markdown(
+        '<div style="font-size:0.75rem;font-weight:700;text-transform:uppercase;'
+        'letter-spacing:1px;color:#64748b;margin-bottom:0.5rem;">Fleet Status</div>',
+        unsafe_allow_html=True,
+    )
     for aid, a in st.session_state.fleet.items():
-        icon = {"Idle": "⚪", "En Route": "🟢", "Arrived": "🔵"}.get(
-            a["status"], "⚪"
+        status_cls = {"Idle": "fc-idle", "En Route": "fc-enroute", "Arrived": "fc-arrived"}.get(
+            a["status"], "fc-idle"
         )
-        st.caption(f"{icon} {aid}: {a['status']}")
+        icon = ""
+        st.markdown(
+            f'<div class="fleet-card">'
+            f'<span class="fc-id">{aid}</span>'
+            f'<span class="fc-status {status_cls}">{a["status"]}</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
 # ================================================================
 # GLOBAL AUTO-MOVEMENT ENGINE
@@ -560,9 +798,29 @@ any_auto_drive = any(
 # ================================================================
 # ADMIN DASHBOARD MODE
 # ================================================================
-if mode == "👨‍💼 Admin Dashboard":
-    st.subheader("👨‍💼 Fleet Overview")
+if mode == "Admin Dashboard":
+    st.markdown(
+        '<div class="section-header"><h3>Fleet Overview</h3></div>',
+        unsafe_allow_html=True,
+    )
 
+    # Summary metrics row
+    total = len(st.session_state.fleet)
+    idle_count = sum(1 for a in st.session_state.fleet.values() if a["status"] == "Idle")
+    active_count = sum(1 for a in st.session_state.fleet.values() if a["status"] == "En Route")
+    arrived_count = sum(1 for a in st.session_state.fleet.values() if a["status"] == "Arrived")
+
+    sm1, sm2, sm3, sm4 = st.columns(4)
+    with sm1:
+        st.metric("Total Fleet", total)
+    with sm2:
+        st.metric("Available", idle_count)
+    with sm3:
+        st.metric("Active", active_count)
+    with sm4:
+        st.metric("Completed", arrived_count)
+
+    # Fleet status table
     fleet_rows = []
     for aid, a in st.session_state.fleet.items():
         if a["routes_data"] and a["status"] == "En Route":
@@ -577,11 +835,11 @@ if mode == "👨‍💼 Admin Dashboard":
             phase_label = "→ Hospital"
         fleet_rows.append(
             {
-                "🚑 ID": aid,
-                "📊 Status": a["status"],
-                "🔀 Phase": phase_label,
-                "📈 Progress": f"{prog}%",
-                "🔄 Reroutes": a["reroute_count"],
+                "ID": aid,
+                "Status": a["status"],
+                "Phase": phase_label,
+                "Progress": f"{prog}%",
+                "Reroutes": a["reroute_count"],
             }
         )
     st.dataframe(pd.DataFrame(fleet_rows), use_container_width=True, hide_index=True)
@@ -609,12 +867,16 @@ if mode == "👨‍💼 Admin Dashboard":
             en = st.session_state.current_emergency
             folium.Marker(
                 location=(G.nodes[en]["y"], G.nodes[en]["x"]),
-                popup="🚨 Emergency",
+                popup="Emergency",
                 icon=folium.DivIcon(
                     html=(
-                        '<div style="font-size:36px;animation:blink 1s infinite;">🚨</div>'
+                        '<div style="width:18px;height:18px;background:#e74c3c;border-radius:50%;'
+                        'border:3px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.4);'
+                        'animation:blink 1s infinite;"></div>'
                         "<style>@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}</style>"
-                    )
+                    ),
+                    icon_size=(18, 18),
+                    icon_anchor=(9, 9),
                 ),
             ).add_to(m)
 
@@ -636,12 +898,20 @@ if mode == "👨‍💼 Admin Dashboard":
                 ).add_to(m)
 
                 cur = route[a["step"]]
-                icon_txt = "🏁" if a["step"] == len(route) - 1 else "🚑"
+                icon_txt_html = (
+                    '<div style="width:14px;height:14px;background:#2ecc71;border-radius:50%;'
+                    'border:2px solid #fff;box-shadow:0 2px 4px rgba(0,0,0,.3);"></div>'
+                    if a["step"] == len(route) - 1
+                    else '<div style="width:16px;height:16px;background:#e74c3c;border-radius:50%;'
+                    'border:3px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.4);"></div>'
+                )
                 folium.Marker(
                     location=(G.nodes[cur]["y"], G.nodes[cur]["x"]),
                     popup=f"{aid} — Step {a['step']+1}/{len(route)}",
                     icon=folium.DivIcon(
-                        html=f'<div style="font-size:32px;">{icon_txt}</div>'
+                        html=icon_txt_html,
+                        icon_size=(16, 16),
+                        icon_anchor=(8, 8),
                     ),
                 ).add_to(m)
 
@@ -650,7 +920,12 @@ if mode == "👨‍💼 Admin Dashboard":
                     location=(G.nodes[a["node"]]["y"], G.nodes[a["node"]]["x"]),
                     popup=f"{aid} — Idle",
                     icon=folium.DivIcon(
-                        html='<div style="font-size:28px;opacity:0.6;">🚑</div>'
+                        html=(
+                            '<div style="width:12px;height:12px;background:#94a3b8;border-radius:50%;'
+                            'border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.3);opacity:0.7;"></div>'
+                        ),
+                        icon_size=(12, 12),
+                        icon_anchor=(6, 6),
                     ),
                 ).add_to(m)
 
@@ -665,7 +940,7 @@ else:
 
     if amb["routes_data"] is None:
         st.info(
-            f"🚑 {selected_ambulance} is Idle. Generate an emergency scenario to dispatch."
+            f"{selected_ambulance} is Idle. Generate an emergency scenario to dispatch."
         )
         st.stop()
 
@@ -678,17 +953,24 @@ else:
     progress = int((amb["step"] / route_steps) * 100)
 
     # ---- Analytics ----
-    phase_txt = "🚨 To Pickup" if amb["phase"] == "ToPickup" else "🏥 To Hospital"
-    st.subheader(f"📊 {selected_ambulance} — {phase_txt}")
+    phase_txt = "To Pickup" if amb["phase"] == "ToPickup" else "To Hospital"
+    phase_color = "#e74c3c" if amb["phase"] == "ToPickup" else "#3498db"
+    st.markdown(
+        f'<div class="section-header">'
+        f'<h3>{selected_ambulance} — '
+        f'<span style="color:{phase_color}">{phase_txt}</span></h3>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.metric("📈 Progress", f"{progress}%")
+        st.metric("Progress", f"{progress}%")
     with c2:
-        st.metric("🚑 Status", amb["status"])
+        st.metric("Status", amb["status"])
     with c3:
         remaining = max(len(route) - amb["step"] - 1, 0)
-        st.metric("⏱️ Steps Left", remaining)
+        st.metric("Steps Left", remaining)
     with c4:
         if len(route) > 1:
             cfs = [
@@ -698,11 +980,11 @@ else:
             avg_cf = float(np.mean(cfs))
         else:
             avg_cf = 1.0
-        label = "🟢 Low" if avg_cf < 1.3 else ("🟡 Medium" if avg_cf < 1.8 else "🔴 High")
-        st.metric("🚦 Congestion", label)
+        label = "Low" if avg_cf < 1.3 else ("Medium" if avg_cf < 1.8 else "High")
+        st.metric("Congestion", label)
 
     # ---- Tabs: Hospital Analysis & Route Comparison ----
-    tab1, tab2 = st.tabs(["🏥 Hospital Analysis", "🗺️ Route Comparison"])
+    tab1, tab2 = st.tabs(["Hospital Analysis", "Route Comparison"])
 
     with tab1:
         if "distances" in data and data["distances"]:
@@ -712,12 +994,12 @@ else:
             ):
                 rows.append(
                     {
-                        "🏆 Rank": rank,
-                        "🏥 Hospital Node": h,
-                        "📏 Distance (km)": round(d / 1000, 2),
-                        "📍 Status": "🎯 Selected"
+                        "Rank": rank,
+                        "Hospital Node": h,
+                        "Distance (km)": round(d / 1000, 2),
+                        "Status": "Selected"
                         if h == data.get("destination")
-                        else "⚪ Available",
+                        else "Available",
                     }
                 )
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
@@ -733,11 +1015,11 @@ else:
         )
         rt_rows.append(
             {
-                "🛣️ Route": "🎯 Optimal",
-                "📏 Distance (km)": round(opt_dist / 1000, 2),
-                "🔗 Nodes": len(route),
-                "💡 Weights": "LSTM-based",
-                "📊 Status": "🟢 Active",
+                "Route": "Optimal",
+                "Distance (km)": round(opt_dist / 1000, 2),
+                "Nodes": len(route),
+                "Weights": "LSTM-based",
+                "Status": "Active",
             }
         )
         for i, alt in enumerate(data.get("alternate_routes", [])):
@@ -748,11 +1030,11 @@ else:
                 )
                 rt_rows.append(
                     {
-                        "🛣️ Route": f"🔄 Alternate {i+1}",
-                        "📏 Distance (km)": round(ad / 1000, 2),
-                        "🔗 Nodes": len(alt),
-                        "💡 Weights": "LSTM-based",
-                        "📊 Status": "🟡 Backup",
+                        "Route": f"Alternate {i+1}",
+                        "Distance (km)": round(ad / 1000, 2),
+                        "Nodes": len(alt),
+                        "Weights": "LSTM-based",
+                        "Status": "Backup",
                     }
                 )
             except (KeyError, IndexError):
@@ -761,10 +1043,13 @@ else:
 
 
     # ---- Movement Controls ----
-    st.subheader("🚑 Movement Control")
+    st.markdown(
+        '<div class="section-header"><h3>Movement Control</h3></div>',
+        unsafe_allow_html=True,
+    )
 
     # Accident simulation button
-    if st.button("⚠️ Simulate Accident on Route", type="secondary", use_container_width=True):
+    if st.button("Simulate Accident on Route", type="secondary", use_container_width=True):
         if 0 < amb["step"] < len(route) - 1:
             current_node = route[amb["step"]]
             old_route = route.copy()
@@ -834,7 +1119,7 @@ else:
                     }
                 )
                 sync_ambulance_state(amb)
-                st.success("✅ Route rerouted around accident")
+                st.success("Route rerouted around accident")
                 st.rerun()
             except nx.NetworkXNoPath:
                 st.error("No alternate path available")
@@ -848,7 +1133,7 @@ else:
         and amb["node"] == amb.get("pickup_node")
     )
     if st.button(
-        "🏥 Generate Hospital Path from Pickup",
+        "Generate Hospital Path",
         use_container_width=True,
         disabled=not can_gen_hospital,
     ):
@@ -879,7 +1164,7 @@ else:
                 amb["event_log"].append({"event": "Patient Picked Up", "node": pickup})
                 amb["auto_drive"] = False
                 sync_ambulance_state(amb)
-                st.success("✅ Hospital route generated. Press ▶️ Start.")
+                st.success("Hospital route generated. Press Start.")
                 st.rerun()
             except nx.NetworkXNoPath:
                 st.error("No path to hospital from pickup.")
@@ -891,18 +1176,18 @@ else:
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         start_dis = amb["status"] == "Arrived" and amb["phase"] == "ToHospital"
-        if st.button("▶️ Start", use_container_width=True, disabled=start_dis):
+        if st.button("Start", use_container_width=True, disabled=start_dis):
             amb["auto_drive"] = True
             st.rerun()
     with col2:
-        if st.button("⬅️ Prev", disabled=amb["step"] == 0, use_container_width=True):
+        if st.button("Prev", disabled=amb["step"] == 0, use_container_width=True):
             amb["auto_drive"] = False
             amb["step"] -= 1
             sync_ambulance_state(amb)
             st.rerun()
     with col3:
         if st.button(
-            "➡️ Next",
+            "Next",
             disabled=amb["step"] >= len(route) - 1,
             use_container_width=True,
         ):
@@ -912,7 +1197,7 @@ else:
             st.rerun()
     with col4:
         if st.button(
-            "⏭️ End",
+            "End",
             disabled=amb["step"] >= len(route) - 1,
             use_container_width=True,
         ):
@@ -926,7 +1211,7 @@ else:
 
     slider_max = max(len(route) - 1, 1)
     slider_val = st.slider(
-        "🚑 Position on Route",
+        "Position on Route",
         0,
         slider_max,
         min(amb["step"], slider_max),
@@ -946,32 +1231,35 @@ else:
 
     # ---- Reroute Event Log ----
     if amb["reroute_count"] > 0 or amb["event_log"]:
-        st.subheader("📜 Event Log")
+        st.markdown(
+            '<div class="section-header"><h3>Event Log</h3></div>',
+            unsafe_allow_html=True,
+        )
         mc1, mc2, mc3 = st.columns(3)
         with mc1:
-            st.metric("🔄 Total Reroutes", amb["reroute_count"])
+            st.metric("Total Reroutes", amb["reroute_count"])
         with mc2:
             if "old_congestion" in data and "new_congestion" in data and data["old_congestion"] > 0:
                 pct = ((data["new_congestion"] - data["old_congestion"]) / data["old_congestion"]) * 100
-                st.metric("🚦 Congestion Δ", f"{pct:+.1f}%")
+                st.metric("Congestion Change", f"{pct:+.1f}%")
         with mc3:
             if "time_saved" in data:
-                st.metric("⏱️ Time Impact", f"{abs(data['time_saved']):.0f}s")
+                st.metric("Time Impact", f"{abs(data['time_saved']):.0f}s")
 
         if amb["event_log"]:
-            with st.expander("📝 Event Details", expanded=True):
+            with st.expander("Event Details", expanded=True):
                 for idx, ev in enumerate(reversed(amb["event_log"])):
                     num = len(amb["event_log"]) - idx
                     if ev["event"] == "Patient Picked Up":
                         st.markdown(
-                            f"**#{num}** — 📍 {ev['event']} at node `{ev['node']}`"
+                            f"**#{num}** — {ev['event']} at node `{ev['node']}`"
                         )
                     else:
                         saved_label = (
                             "saved" if ev.get("time_saved", 0) > 0 else "added"
                         )
                         st.markdown(
-                            f"**#{num}** — ⚠️ {ev['event']} at node `{ev['node']}`  \n"
+                            f"**#{num}** — {ev['event']} at node `{ev['node']}`  \n"
                             f"Congestion: {ev.get('old_congestion',0):.2f} → {ev.get('new_congestion',0):.2f} · "
                             f"Time: {abs(ev.get('time_saved',0)):.0f}s {saved_label}"
                         )
@@ -1001,13 +1289,13 @@ else:
 
     # Optimal route (red)
     opt_pts = [(G.nodes[n]["y"], G.nodes[n]["x"]) for n in route]
-    folium.PolyLine(opt_pts, color="red", weight=5, opacity=0.85, tooltip="🚑 Optimal Route").add_to(m)
+    folium.PolyLine(opt_pts, color="red", weight=5, opacity=0.85, tooltip="Optimal Route").add_to(m)
 
     # Start marker
     sn = data["start"]
     folium.Marker(
         location=(G.nodes[sn]["y"], G.nodes[sn]["x"]),
-        popup="🏁 Start",
+        popup="Start",
         icon=folium.Icon(color="green", icon="play"),
     ).add_to(m)
 
@@ -1016,12 +1304,16 @@ else:
         pn = amb["pickup_node"]
         folium.Marker(
             location=(G.nodes[pn]["y"], G.nodes[pn]["x"]),
-            popup="🚨 Emergency Pickup",
+            popup="Emergency Pickup",
             icon=folium.DivIcon(
                 html=(
-                    '<div style="font-size:36px;animation:blink 1s infinite;">🚨</div>'
+                    '<div style="width:18px;height:18px;background:#e74c3c;border-radius:50%;'
+                    'border:3px solid #fff;box-shadow:0 2px 8px rgba(231,76,60,.5);'
+                    'animation:blink 1s infinite;"></div>'
                     "<style>@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}</style>"
-                )
+                ),
+                icon_size=(18, 18),
+                icon_anchor=(9, 9),
             ),
         ).add_to(m)
 
@@ -1035,74 +1327,86 @@ else:
             fill=True,
             fillColor="#ff7f7f" if is_dest else "lightblue",
             fillOpacity=0.6,
-            popup="🏥 Destination" if is_dest else "🏥 Hospital",
+            popup="Destination Hospital" if is_dest else "Hospital",
             weight=2,
         ).add_to(m)
 
     # Ambulance marker
     folium.Marker(
         location=(lat, lon),
-        popup=f"🚑 {selected_ambulance} — Step {amb['step']+1}/{len(route)}",
+        popup=f"{selected_ambulance} — Step {amb['step']+1}/{len(route)}",
         icon=folium.DivIcon(
             html=(
-                '<div style="font-size:42px;text-shadow:2px 2px 4px rgba(0,0,0,.6);'
-                'animation:pulse 2s infinite;">🚑</div>'
-                "<style>@keyframes pulse{0%{transform:scale(1)}50%{transform:scale(1.1)}"
-                "100%{transform:scale(1)}}</style>"
+                '<div style="width:22px;height:22px;background:linear-gradient(135deg,#e74c3c,#c0392b);'
+                'border-radius:50%;border:3px solid #fff;box-shadow:0 3px 10px rgba(231,76,60,.5);'
+                'animation:pulse 2s infinite;"></div>'
+                "<style>@keyframes pulse{0%{transform:scale(1);box-shadow:0 3px 10px rgba(231,76,60,.5)}"
+                "50%{transform:scale(1.15);box-shadow:0 4px 16px rgba(231,76,60,.7)}"
+                "100%{transform:scale(1);box-shadow:0 3px 10px rgba(231,76,60,.5)}}</style>"
             ),
-            icon_size=(56, 56),
-            icon_anchor=(28, 28),
+            icon_size=(22, 22),
+            icon_anchor=(11, 11),
         ),
     ).add_to(m)
 
     st_folium(m, height=650, use_container_width=True)
 
     # ---- Legend ----
-    st.subheader("🗺️ Map Legend")
-    l1, l2, l3 = st.columns(3)
-    with l1:
-        st.markdown("`🚑` Ambulance  \n`🔴` Optimal Route")
-        if "old_route" in data:
-            st.markdown("`⚫` Previous Route")
-    with l2:
-        st.markdown("`🔵` Alt Route 1  \n`🟢` Alt Route 2  \n`🟠` Alt Route 3")
-    with l3:
-        st.markdown("`🏁` Start  \n`🏥` Hospital  \n`🚨` Emergency")
+    st.markdown(
+        '<div class="section-header"><h3>Map Legend</h3></div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div style="display:flex;flex-wrap:wrap;gap:0.4rem;margin-bottom:1rem;">'
+        '<span class="legend-item"><span class="legend-dot" style="background:#e74c3c;"></span> Optimal Route</span>'
+        '<span class="legend-item"><span class="legend-dot" style="background:#3498db;"></span> Alt Route 1</span>'
+        '<span class="legend-item"><span class="legend-dot" style="background:#2ecc71;"></span> Alt Route 2</span>'
+        '<span class="legend-item"><span class="legend-dot" style="background:#f39c12;"></span> Alt Route 3</span>'
+        '<span class="legend-item"><span class="legend-dot" style="background:#2ecc71;border:2px solid #27ae60;"></span> Start</span>'
+        '<span class="legend-item"><span class="legend-dot" style="background:#85c1e9;"></span> Hospital</span>'
+        '<span class="legend-item"><span class="legend-dot" style="background:#e74c3c;border:2px solid #c0392b;"></span> Emergency</span>'
+        + ('<span class="legend-item"><span class="legend-dot" style="background:#95a5a6;"></span> Previous Route</span>' if "old_route" in data else '')
+        + '</div>',
+        unsafe_allow_html=True,
+    )
 
     # ---- Mission Status ----
-    st.subheader("📊 Mission Status")
-    st.progress(progress, text=f"🚑 Mission Progress: {progress}%")
+    st.markdown(
+        '<div class="section-header"><h3>Mission Status</h3></div>',
+        unsafe_allow_html=True,
+    )
+    st.progress(progress, text=f"Mission Progress: {progress}%")
 
     if amb["step"] == 0:
         if amb["phase"] == "ToPickup":
-            st.info("🚨 Dispatched to pickup location")
+            st.info("Dispatched to pickup location")
         elif amb["phase"] == "ToHospital":
-            st.info("🏥 Transporting patient to hospital")
+            st.info("Transporting patient to hospital")
     elif amb["step"] >= len(route) - 1:
         if amb["phase"] == "ToPickup":
-            st.warning("📍 At pickup. Click 🏥 Generate Hospital Path to continue.")
+            st.warning("At pickup. Click Generate Hospital Path to continue.")
         elif amb["phase"] == "ToHospital":
-            st.success("✅ Arrived at hospital!")
+            st.success("Arrived at hospital")
         else:
-            st.success("✅ Arrived at destination!")
+            st.success("Arrived at destination")
 
     sc1, sc2, sc3, sc4 = st.columns(4)
     with sc1:
-        st.metric("📍 Step", f"{amb['step']+1}/{len(route)}")
+        st.metric("Step", f"{amb['step']+1}/{len(route)}")
     with sc2:
-        st.metric("📈 Progress", f"{progress}%")
+        st.metric("Progress", f"{progress}%")
     with sc3:
         total_dist = sum(
             _edge_attr(G, route[j], route[j + 1], "length", 0)
             for j in range(len(route) - 1)
         )
-        st.metric("📏 Distance", f"{total_dist/1000:.1f} km")
+        st.metric("Distance", f"{total_dist/1000:.1f} km")
     with sc4:
         rem = max(len(route) - amb["step"] - 1, 0)
         if rem == 0:
-            st.success("🏁 ARRIVED")
+            st.success("ARRIVED")
         else:
-            st.info(f"⏱️ {rem} steps left")
+            st.info(f"{rem} steps left")
 
 # ================================================================
 # AUTO-DRIVE RERUN LOOP
