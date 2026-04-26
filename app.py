@@ -685,9 +685,13 @@ with st.sidebar:
     mode = st.radio("View Mode", ["Admin Dashboard", "Ambulance Panel"])
 
     if mode == "Ambulance Panel":
-        selected_ambulance = st.selectbox(
-            "Select Unit", list(st.session_state.fleet.keys())
-        )
+        # Build descriptive labels: "A1 — Idle", "A2 — En Route", etc.
+        amb_options = {
+            f"{aid} — {a['status']}": aid
+            for aid, a in st.session_state.fleet.items()
+        }
+        selected_label = st.selectbox("Select Unit", list(amb_options.keys()))
+        selected_ambulance = amb_options[selected_label]
 
     st.divider()
 
